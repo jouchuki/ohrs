@@ -186,6 +186,7 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     tool_registry.register(Box::new(skill_tool));
     let tool_registry = Arc::new(tool_registry);
 
+    let system_prompt_copy = system_prompt.clone();
     let mut engine = QueryEngine::new(
         api_client,
         tool_registry,
@@ -239,7 +240,13 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Save trajectory if requested
         if let Some(ref traj_path) = args.trajectory {
-            save_trajectory(traj_path, &events)?;
+            save_trajectory(
+                traj_path,
+                &system_prompt_copy,
+                &prompt,
+                &settings.model,
+                &events,
+            )?;
             eprintln!("[trajectory saved to {traj_path}]");
         }
         // Fire SessionEnd hook before exiting print mode
@@ -259,13 +266,27 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Serialize the complete trajectory to a JSONL file.
+/// Serialize a training-ready trajectory to JSONL.
 ///
-/// Captures EVERYTHING the agent does — every reasoning fragment, every
-/// complete response, every tool invocation, every tool output. Nothing
-/// is filtered or skipped.
+/// Output format follows the chat completions message schema so it can
+/// be fed directly into fine-tuning pipelines:
+///
+/// ```jsonl
+/// {"role":"system","content":"..."}
+/// {"role":"user","content":"..."}
+/// {"role":"assistant","content":"reasoning...","tool_calls":[{"id":"...","type":"function","function":{"name":"bash","arguments":"{...}"}}]}
+/// {"role":"tool","tool_call_id":"...","name":"bash","content":"output..."}
+/// {"role":"assistant","content":"more reasoning..."}
+/// ```
+///
+/// Metadata (model, timing, token usage) is attached as `_meta` on
+/// assistant messages so it can be stripped for training but kept for
+/// analysis.
 fn save_trajectory(
     path: &str,
+    system_prompt: &str,
+    user_message: &str,
+    model: &str,
     events: &[(oh_types::stream_events::StreamEvent, Option<oh_types::api::UsageSnapshot>)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
@@ -274,123 +295,137 @@ fn save_trajectory(
 
     let file = std::fs::File::create(path)?;
     let mut writer = std::io::BufWriter::new(file);
-    let mut turn: u32 = 0;
-    let mut seq: u32 = 0;
     let start = std::time::Instant::now();
 
-    let mut write_entry = |writer: &mut std::io::BufWriter<std::fs::File>,
-                           start: std::time::Instant,
-                           entry: serde_json::Value|
+    let mut writeln_json = |writer: &mut std::io::BufWriter<std::fs::File>,
+                            entry: serde_json::Value|
      -> Result<(), Box<dyn std::error::Error>> {
-        // Wrap every entry with a wall-clock offset so you can reconstruct timing
-        let mut wrapped = entry;
-        wrapped["_t_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
-        serde_json::to_writer(&mut *writer, &wrapped)?;
+        serde_json::to_writer(&mut *writer, &entry)?;
         writeln!(writer)?;
         Ok(())
     };
 
+    // ── System prompt ──
+    writeln_json(&mut writer, serde_json::json!({
+        "role": "system",
+        "content": system_prompt,
+        "_meta": {
+            "model": model,
+            "timestamp": chrono_now(),
+        }
+    }))?;
+
+    // ── User message ──
+    writeln_json(&mut writer, serde_json::json!({
+        "role": "user",
+        "content": user_message,
+    }))?;
+
+    // ── Agent turns ──
+    // Track pending tool_call_ids so we can pair ToolExecutionCompleted
+    // with the correct call (supports parallel tool calls).
+    let mut pending_tool_ids: std::collections::VecDeque<(String, String)> = std::collections::VecDeque::new();
+
     for (event, usage) in events {
         match event {
-            // ── Streaming text fragment (intermediate reasoning) ──
-            StreamEvent::AssistantTextDelta(delta) => {
-                write_entry(&mut writer, start, serde_json::json!({
-                    "seq": seq,
-                    "turn": turn,
-                    "action": "text_delta",
-                    "text": delta.text,
-                }))?;
-                seq += 1;
-            }
-
-            // ── Complete assistant response (full content blocks) ──
             StreamEvent::AssistantTurnComplete(tc) => {
-                turn += 1;
-
-                // Emit the full turn as one record with all content blocks
-                let mut reasoning: Vec<String> = Vec::new();
-                let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-                let mut all_blocks: Vec<serde_json::Value> = Vec::new();
-
-                for block in &tc.message.content {
-                    match block {
-                        ContentBlock::Text(t) => {
-                            reasoning.push(t.text.clone());
-                            all_blocks.push(serde_json::json!({
-                                "type": "text",
-                                "text": t.text,
-                            }));
-                        }
-                        ContentBlock::ToolUse(tu) => {
-                            let tc_json = serde_json::json!({
-                                "id": tu.id,
-                                "name": tu.name,
-                                "input": tu.input,
-                            });
-                            tool_calls.push(tc_json.clone());
-                            all_blocks.push(serde_json::json!({
-                                "type": "tool_use",
-                                "tool_call": tc_json,
-                            }));
-                        }
-                        ContentBlock::ToolResult(tr) => {
-                            all_blocks.push(serde_json::json!({
-                                "type": "tool_result",
-                                "tool_use_id": tr.tool_use_id,
-                                "content": tr.content,
-                                "is_error": tr.is_error,
-                            }));
-                        }
+                // Build content string from text blocks
+                let content: String = tc.message.content.iter().filter_map(|b| {
+                    match b {
+                        ContentBlock::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
+                        _ => None,
                     }
+                }).collect::<Vec<_>>().join("");
+
+                // Build tool_calls array in OpenAI fine-tuning format
+                let tool_calls: Vec<serde_json::Value> = tc.message.content.iter().filter_map(|b| {
+                    match b {
+                        ContentBlock::ToolUse(tu) => {
+                            // Queue the id so we can match it to ToolExecutionCompleted
+                            pending_tool_ids.push_back((tu.name.clone(), tu.id.clone()));
+                            Some(serde_json::json!({
+                                "id": tu.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tu.name,
+                                    "arguments": serde_json::to_string(&tu.input).unwrap_or_default(),
+                                }
+                            }))
+                        }
+                        _ => None,
+                    }
+                }).collect();
+
+                let mut msg = serde_json::json!({
+                    "role": "assistant",
+                });
+
+                // content is null when there's only tool calls (per OpenAI spec)
+                if content.is_empty() {
+                    msg["content"] = serde_json::Value::Null;
+                } else {
+                    msg["content"] = serde_json::json!(content);
                 }
 
-                write_entry(&mut writer, start, serde_json::json!({
-                    "seq": seq,
-                    "turn": turn,
-                    "action": "assistant_response",
-                    "reasoning": reasoning.join(""),
-                    "tool_calls": tool_calls,
-                    "content_blocks": all_blocks,
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = serde_json::json!(tool_calls);
+                }
+
+                // Attach metadata for analysis (strip for training)
+                msg["_meta"] = serde_json::json!({
                     "usage": usage,
-                }))?;
-                seq += 1;
+                    "_t_ms": start.elapsed().as_millis() as u64,
+                });
+
+                writeln_json(&mut writer, msg)?;
             }
 
-            // ── Tool dispatch (before execution) ──
-            StreamEvent::ToolExecutionStarted(ts) => {
-                write_entry(&mut writer, start, serde_json::json!({
-                    "seq": seq,
-                    "turn": turn,
-                    "action": "tool_start",
-                    "tool": ts.tool_name,
-                    "input": ts.tool_input,
-                }))?;
-                seq += 1;
-            }
-
-            // ── Tool result (after execution) ──
             StreamEvent::ToolExecutionCompleted(tc) => {
-                write_entry(&mut writer, start, serde_json::json!({
-                    "seq": seq,
-                    "turn": turn,
-                    "action": "tool_result",
-                    "tool": tc.tool_name,
-                    "output": tc.output,
-                    "is_error": tc.is_error,
+                // Pop the matching tool_call_id from the queue
+                let tool_call_id = pending_tool_ids.iter()
+                    .position(|(name, _)| name == &tc.tool_name)
+                    .and_then(|i| pending_tool_ids.remove(i))
+                    .map(|(_, id)| id)
+                    .unwrap_or_default();
+
+                writeln_json(&mut writer, serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": tc.tool_name,
+                    "content": tc.output,
+                    "_meta": {
+                        "is_error": tc.is_error,
+                        "_t_ms": start.elapsed().as_millis() as u64,
+                    }
                 }))?;
-                seq += 1;
             }
+
+            // Text deltas and tool starts are intermediate signals —
+            // the complete data is in AssistantTurnComplete and
+            // ToolExecutionCompleted above. Skip to keep the training
+            // format clean.
+            StreamEvent::AssistantTextDelta(_) => {}
+            StreamEvent::ToolExecutionStarted(_) => {}
         }
     }
 
-    // Summary footer
-    write_entry(&mut writer, start, serde_json::json!({
-        "seq": seq,
-        "action": "trajectory_end",
-        "total_turns": turn,
-        "total_events": seq,
-        "elapsed_ms": start.elapsed().as_millis() as u64,
-    }))?;
-
     Ok(())
+}
+
+fn chrono_now() -> String {
+    use std::time::SystemTime;
+    let duration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // ISO-8601 approximation without pulling in chrono
+    let days = secs / 86400;
+    let years = 1970 + days / 365;
+    let rem_days = days % 365;
+    let months = rem_days / 30 + 1;
+    let day = rem_days % 30 + 1;
+    let hour = (secs % 86400) / 3600;
+    let min = (secs % 3600) / 60;
+    let sec = secs % 60;
+    format!("{years:04}-{months:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
