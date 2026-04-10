@@ -259,13 +259,11 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Serialize trajectory as structured action records to a JSONL file.
+/// Serialize the complete trajectory to a JSONL file.
 ///
-/// Produces a human-readable replay log with entries like:
-///   {"turn":1, "action":"reasoning", "text":"Let me examine..."}
-///   {"turn":1, "action":"tool_call", "tool":"bash", "input":{...}}
-///   {"turn":1, "action":"tool_result", "tool":"bash", "output":"...", "is_error":false}
-///   {"turn":2, "action":"reasoning", "text":"Based on the output..."}
+/// Captures EVERYTHING the agent does — every reasoning fragment, every
+/// complete response, every tool invocation, every tool output. Nothing
+/// is filtered or skipped.
 fn save_trajectory(
     path: &str,
     events: &[(oh_types::stream_events::StreamEvent, Option<oh_types::api::UsageSnapshot>)],
@@ -278,70 +276,101 @@ fn save_trajectory(
     let mut writer = std::io::BufWriter::new(file);
     let mut turn: u32 = 0;
     let mut seq: u32 = 0;
+    let start = std::time::Instant::now();
 
     let mut write_entry = |writer: &mut std::io::BufWriter<std::fs::File>,
+                           start: std::time::Instant,
                            entry: serde_json::Value|
      -> Result<(), Box<dyn std::error::Error>> {
-        serde_json::to_writer(&mut *writer, &entry)?;
+        // Wrap every entry with a wall-clock offset so you can reconstruct timing
+        let mut wrapped = entry;
+        wrapped["_t_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
+        serde_json::to_writer(&mut *writer, &wrapped)?;
         writeln!(writer)?;
         Ok(())
     };
 
     for (event, usage) in events {
         match event {
+            // ── Streaming text fragment (intermediate reasoning) ──
+            StreamEvent::AssistantTextDelta(delta) => {
+                write_entry(&mut writer, start, serde_json::json!({
+                    "seq": seq,
+                    "turn": turn,
+                    "action": "text_delta",
+                    "text": delta.text,
+                }))?;
+                seq += 1;
+            }
+
+            // ── Complete assistant response (full content blocks) ──
             StreamEvent::AssistantTurnComplete(tc) => {
                 turn += 1;
-                // Extract reasoning text and tool calls separately
-                let mut reasoning_parts: Vec<String> = Vec::new();
+
+                // Emit the full turn as one record with all content blocks
+                let mut reasoning: Vec<String> = Vec::new();
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+                let mut all_blocks: Vec<serde_json::Value> = Vec::new();
 
                 for block in &tc.message.content {
                     match block {
-                        ContentBlock::Text(t) if !t.text.trim().is_empty() => {
-                            reasoning_parts.push(t.text.clone());
+                        ContentBlock::Text(t) => {
+                            reasoning.push(t.text.clone());
+                            all_blocks.push(serde_json::json!({
+                                "type": "text",
+                                "text": t.text,
+                            }));
                         }
                         ContentBlock::ToolUse(tu) => {
-                            tool_calls.push(serde_json::json!({
+                            let tc_json = serde_json::json!({
                                 "id": tu.id,
                                 "name": tu.name,
                                 "input": tu.input,
+                            });
+                            tool_calls.push(tc_json.clone());
+                            all_blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "tool_call": tc_json,
                             }));
                         }
-                        _ => {}
+                        ContentBlock::ToolResult(tr) => {
+                            all_blocks.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": tr.tool_use_id,
+                                "content": tr.content,
+                                "is_error": tr.is_error,
+                            }));
+                        }
                     }
                 }
 
-                // Emit reasoning entry if the model produced any text
-                if !reasoning_parts.is_empty() {
-                    write_entry(&mut writer, serde_json::json!({
-                        "seq": seq,
-                        "turn": turn,
-                        "action": "reasoning",
-                        "text": reasoning_parts.join("\n"),
-                        "usage": usage,
-                    }))?;
-                    seq += 1;
-                }
+                write_entry(&mut writer, start, serde_json::json!({
+                    "seq": seq,
+                    "turn": turn,
+                    "action": "assistant_response",
+                    "reasoning": reasoning.join(""),
+                    "tool_calls": tool_calls,
+                    "content_blocks": all_blocks,
+                    "usage": usage,
+                }))?;
+                seq += 1;
+            }
 
-                // Emit each tool call the model decided to make
-                for tc in &tool_calls {
-                    write_entry(&mut writer, serde_json::json!({
-                        "seq": seq,
-                        "turn": turn,
-                        "action": "tool_call",
-                        "tool": tc["name"],
-                        "tool_call_id": tc["id"],
-                        "input": tc["input"],
-                    }))?;
-                    seq += 1;
-                }
+            // ── Tool dispatch (before execution) ──
+            StreamEvent::ToolExecutionStarted(ts) => {
+                write_entry(&mut writer, start, serde_json::json!({
+                    "seq": seq,
+                    "turn": turn,
+                    "action": "tool_start",
+                    "tool": ts.tool_name,
+                    "input": ts.tool_input,
+                }))?;
+                seq += 1;
             }
-            StreamEvent::ToolExecutionStarted(_) => {
-                // Captured in AssistantTurnComplete tool_calls above;
-                // skip to avoid duplication.
-            }
+
+            // ── Tool result (after execution) ──
             StreamEvent::ToolExecutionCompleted(tc) => {
-                write_entry(&mut writer, serde_json::json!({
+                write_entry(&mut writer, start, serde_json::json!({
                     "seq": seq,
                     "turn": turn,
                     "action": "tool_result",
@@ -351,18 +380,16 @@ fn save_trajectory(
                 }))?;
                 seq += 1;
             }
-            StreamEvent::AssistantTextDelta(_) => {
-                // Streaming fragments — full text captured in TurnComplete.
-            }
         }
     }
 
     // Summary footer
-    write_entry(&mut writer, serde_json::json!({
+    write_entry(&mut writer, start, serde_json::json!({
         "seq": seq,
-        "action": "trajectory_summary",
+        "action": "trajectory_end",
         "total_turns": turn,
         "total_events": seq,
+        "elapsed_ms": start.elapsed().as_millis() as u64,
     }))?;
 
     Ok(())
