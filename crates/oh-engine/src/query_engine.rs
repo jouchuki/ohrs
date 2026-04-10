@@ -97,6 +97,11 @@ impl QueryEngine {
         &self.messages
     }
 
+    /// Return all tool schemas as JSON values (for trajectory recording).
+    pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
+        self.tool_registry.to_api_schema()
+    }
+
     pub fn total_usage(&self) -> &CostTracker {
         &self.cost_tracker
     }

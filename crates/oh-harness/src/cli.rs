@@ -240,11 +240,13 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Save trajectory if requested
         if let Some(ref traj_path) = args.trajectory {
+            let tool_schemas = engine.tool_schemas();
             save_trajectory(
                 traj_path,
                 &system_prompt_copy,
                 &prompt,
                 &settings.model,
+                &tool_schemas,
                 &events,
             )?;
             eprintln!("[trajectory saved to {traj_path}]");
@@ -287,6 +289,7 @@ fn save_trajectory(
     system_prompt: &str,
     user_message: &str,
     model: &str,
+    tool_schemas: &[serde_json::Value],
     events: &[(oh_types::stream_events::StreamEvent, Option<oh_types::api::UsageSnapshot>)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
@@ -312,6 +315,7 @@ fn save_trajectory(
         "_meta": {
             "model": model,
             "timestamp": chrono_now(),
+            "tools": tool_schemas,
         }
     }))?;
 
