@@ -15,7 +15,7 @@ Four hook types, each for a different integration pattern:
 | **Prompt** | LLM call | Yes | Semantic validation, safety checks |
 | **Agent** | LLM call (deep) | Yes | Complex policy, adversarial review |
 
-Hooks fire at 21+ lifecycle points including `PreToolUse`, `PostToolUse`, `PreApiRequest`, `PostApiResponse`, `PermissionDenied`, `QueryTurnStart`, `QueryTurnEnd`, `SessionStart`, `SessionEnd`, and more. Each receives the full event payload as JSON. Hooks can be configured in `settings.json`, loaded from plugins, or modified at runtime by the agent itself.
+Hooks fire at **42 lifecycle points** covering sessions, API calls, tool execution, permissions, messages, query turns, plugins, MCP, tasks, streaming, and more. Each receives the full event payload as JSON. Hooks can be configured in `settings.json`, loaded from plugins, or modified at runtime by the agent itself.
 
 ## Installation
 
@@ -68,8 +68,6 @@ Auto-detected from model name, base URL, or explicit config:
 |----------|-----------|---------------|---------|
 | Anthropic | `claude-*` models, default | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
 | OpenAI | `gpt-*`, `o1/o3/o4` models | `gpt-5.4-2026-03-05` | `OPENAI_API_KEY` |
-| Bedrock | URL contains `bedrock` | — | `ANTHROPIC_API_KEY` |
-| Vertex | URL contains `googleapis` | — | `ANTHROPIC_API_KEY` |
 
 Switch provider explicitly:
 
@@ -146,13 +144,13 @@ In `~/.openharnessrs/settings.json`:
 }
 ```
 
-### Hook events
+### Hook events (42)
 
 **Session**: `SessionStart`, `SessionEnd`, `SessionSave`, `SessionResume`
 
-**API**: `PreApiRequest`, `PostApiResponse`, `ApiRetry`, `ApiError_`
+**API**: `PreApiRequest`, `PostApiResponse`, `ApiRetry`, `ApiError`
 
-**Tools**: `PreToolUse`, `PostToolUse`, `ToolInputValidation`, `ToolTimeout`, `ToolError_`
+**Tools**: `PreToolUse`, `PostToolUse`, `ToolInputValidation`, `ToolTimeout`, `ToolError`
 
 **Permissions**: `PrePermissionCheck`, `PostPermissionCheck`, `PermissionDenied`, `PermissionConfirmation`
 
@@ -160,7 +158,17 @@ In `~/.openharnessrs/settings.json`:
 
 **Query loop**: `QueryTurnStart`, `QueryTurnEnd`
 
-**System**: `ErrorOccurred`, `PreClearHistory`, `PostClearHistory`, `PluginLoaded`, `PluginUnloaded`, `McpConnected`, `McpDisconnected`, `TaskCreated`, `TaskCompleted`, `ContextCompacted`, `MemoryUpdated`, `SkillInvoked`, `StreamStart`, `StreamEnd`
+**Commands**: `PreCommand`, `PostCommand`, `CommandExecuted`
+
+**Streaming**: `StreamStart`, `StreamEnd`
+
+**History**: `PreClearHistory`, `PostClearHistory`, `ContextCompacted`, `MemoryUpdated`
+
+**Plugins & MCP**: `PluginLoaded`, `PluginUnloaded`, `McpConnected`, `McpDisconnected`
+
+**Tasks**: `TaskCreated`, `TaskCompleted`
+
+**Other**: `ErrorOccurred`, `SkillInvoked`
 
 ### Glob matching
 
