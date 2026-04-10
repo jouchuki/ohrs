@@ -1,0 +1,10 @@
+[package]
+name = "oh-plugin-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable C FFI ABI for OpenHarness dylib plugins"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

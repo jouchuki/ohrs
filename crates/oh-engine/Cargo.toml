@@ -1,0 +1,26 @@
+[package]
+name = "oh-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query engine: conversation loop, tool dispatch, cost tracking"
+
+[dependencies]
+oh-types.workspace = true
+oh-telemetry.workspace = true
+oh-api.workspace = true
+oh-tools.workspace = true
+oh-hooks.workspace = true
+oh-permissions.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+opentelemetry.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+oh-config.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

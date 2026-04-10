@@ -1,0 +1,36 @@
+[package]
+name = "oh-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenHarness CLI binary — AI-powered coding assistant"
+
+[[bin]]
+name = "oh"
+path = "src/main.rs"
+
+[[bin]]
+name = "openharness"
+path = "src/main.rs"
+
+[dependencies]
+oh-types.workspace = true
+oh-plugin-abi.workspace = true
+oh-telemetry.workspace = true
+oh-config.workspace = true
+oh-permissions.workspace = true
+oh-api.workspace = true
+oh-hooks.workspace = true
+oh-mcp.workspace = true
+oh-tools.workspace = true
+oh-engine.workspace = true
+oh-plugins.workspace = true
+oh-services.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+futures.workspace = true
+ratatui = "0.29"
+crossterm = "0.28"

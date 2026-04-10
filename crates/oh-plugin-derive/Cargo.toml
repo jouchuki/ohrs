@@ -1,0 +1,14 @@
+[package]
+name = "oh-plugin-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Proc-macro generating extern C glue for OpenHarness plugins"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true

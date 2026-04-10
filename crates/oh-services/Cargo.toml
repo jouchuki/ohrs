@@ -1,0 +1,17 @@
+[package]
+name = "oh-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Supporting services: tasks, memory, sessions, skills, prompts, bridge, coordinator, cron"
+
+[dependencies]
+oh-types.workspace = true
+oh-telemetry.workspace = true
+oh-config.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "oh-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenTelemetry initialization, span helpers, and metrics for OpenHarness"
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+thiserror.workspace = true

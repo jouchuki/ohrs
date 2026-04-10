@@ -1,0 +1,99 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oh-types",
+    "crates/oh-plugin-abi",
+    "crates/oh-plugin-derive",
+    "crates/oh-telemetry",
+    "crates/oh-config",
+    "crates/oh-permissions",
+    "crates/oh-api",
+    "crates/oh-hooks",
+    "crates/oh-mcp",
+    "crates/oh-tools",
+    "crates/oh-engine",
+    "crates/oh-plugins",
+    "crates/oh-services",
+    "crates/oh-harness",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/HKUDS/openharness-rs"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+pin-project-lite = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream"], default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Telemetry
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.27"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
+
+# Plugin loading
+libloading = "0.8"
+
+# Regex
+regex = "1"
+
+# Glob / pattern matching
+globset = "0.4"
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# File watching
+notify = "7"
+
+# XDG paths
+dirs = "5"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Proc macro helpers
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+# Internal crates
+oh-types = { path = "crates/oh-types" }
+oh-plugin-abi = { path = "crates/oh-plugin-abi" }
+oh-plugin-derive = { path = "crates/oh-plugin-derive" }
+oh-telemetry = { path = "crates/oh-telemetry" }
+oh-config = { path = "crates/oh-config" }
+oh-permissions = { path = "crates/oh-permissions" }
+oh-api = { path = "crates/oh-api" }
+oh-hooks = { path = "crates/oh-hooks" }
+oh-mcp = { path = "crates/oh-mcp" }
+oh-tools = { path = "crates/oh-tools" }
+oh-engine = { path = "crates/oh-engine" }
+oh-plugins = { path = "crates/oh-plugins" }
+oh-services = { path = "crates/oh-services" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

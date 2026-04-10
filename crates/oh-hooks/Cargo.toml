@@ -1,0 +1,21 @@
+[package]
+name = "oh-hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hook system with 21 lifecycle events and 4 executor types"
+
+[dependencies]
+oh-types.workspace = true
+oh-api.workspace = true
+oh-telemetry.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+globset.workspace = true
+notify.workspace = true
+opentelemetry.workspace = true
+futures.workspace = true
