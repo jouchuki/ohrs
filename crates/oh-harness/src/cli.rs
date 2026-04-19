@@ -1,7 +1,7 @@
 //! CLI argument definitions and main entry point.
 
 use clap::Parser;
-use oh_api::{AnthropicApiClient, OpenAiApiClient, StreamingApiClient};
+use oh_api::{AnthropicApiClient, CodexApiClient, OpenAiApiClient, StreamingApiClient};
 use oh_config::{load_settings, CliOverrides};
 use oh_engine::QueryEngine;
 use oh_hooks::executor::{HookExecutionContext, HookExecutor};
@@ -100,11 +100,19 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         api_key: None,
     });
 
-    // Resolve API key
+    // Resolve API key (empty string for Codex ChatGPT OAuth — tokens are in env).
     let api_key = settings.resolve_api_key()?;
 
-    // Create API client — pick provider automatically
-    let api_client: Arc<dyn StreamingApiClient> = if settings.is_openai() {
+    // Create API client — pick provider automatically.
+    let api_client: Arc<dyn StreamingApiClient> = if settings.is_codex() {
+        tracing::info!(provider = "openai-codex", model = %settings.model, "Using Codex ChatGPT provider");
+        let client = CodexApiClient::from_env().map_err(|e| {
+            format!(
+                "Codex provider requires CODEX_ACCESS_TOKEN and CODEX_REFRESH_TOKEN env vars: {e}"
+            )
+        })?;
+        Arc::new(client)
+    } else if settings.is_openai() {
         tracing::info!(provider = "openai", model = %settings.model, "Using OpenAI provider");
         Arc::new(OpenAiApiClient::new(&api_key, settings.base_url.as_deref()))
     } else {

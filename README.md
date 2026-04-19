@@ -1,10 +1,10 @@
-# OpenHarness
+# ohrs
 
 A Rust-based AI agent harness with deep lifecycle hooks, multi-provider LLM support, and full action trajectory recording.
 
 ## What makes this different
 
-Most agent frameworks give you a loop: prompt the model, run tools, repeat. OpenHarness wraps **every internal event** — API calls, tool executions, permission checks, message pushes, session lifecycle — in a hook system that lets you observe, validate, or block any operation in real time.
+Most agent frameworks give you a loop: prompt the model, run tools, repeat. ohrs wraps **every internal event** — API calls, tool executions, permission checks, message pushes, session lifecycle — in a hook system that lets you observe, validate, or block any operation in real time.
 
 Four hook types, each for a different integration pattern:
 

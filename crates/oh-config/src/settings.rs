@@ -190,7 +190,15 @@ impl Default for Settings {
 
 impl Settings {
     /// Resolve API key: instance value > provider-specific env var > generic env var > error.
+    ///
+    /// For the Codex ChatGPT OAuth provider (`openai-codex`), no API key is
+    /// required — the access/refresh tokens live in env vars consumed by the
+    /// provider itself. Callers should check `is_codex()` before calling this.
     pub fn resolve_api_key(&self) -> Result<String, SettingsError> {
+        if self.is_codex() {
+            // Codex uses OAuth tokens via env vars, not an API key.
+            return Ok(String::new());
+        }
         if !self.api_key.is_empty() {
             return Ok(self.api_key.clone());
         }
@@ -207,8 +215,19 @@ impl Settings {
         Err(SettingsError::MissingApiKey)
     }
 
-    /// Returns true if the provider is OpenAI.
+    /// Returns true if the provider is the Codex ChatGPT OAuth backend.
+    pub fn is_codex(&self) -> bool {
+        matches!(
+            self.provider.as_str(),
+            "openai-codex" | "codex" | "codex-chatgpt"
+        )
+    }
+
+    /// Returns true if the provider is OpenAI (regular API key; not Codex).
     pub fn is_openai(&self) -> bool {
+        if self.is_codex() {
+            return false;
+        }
         self.provider == "openai"
             || self
                 .base_url
