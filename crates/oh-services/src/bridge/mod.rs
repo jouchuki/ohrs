@@ -283,24 +283,28 @@ pub fn generate_work_secret() -> WorkSecret {
     }
 }
 
+/// The fixed byte length of a generated work-secret token (64 hex chars = 32 bytes).
+const SECRET_TOKEN_LEN: usize = 64;
+
 /// Constant-time comparison: true iff `provided` matches `expected.session_ingress_token`.
 ///
-/// Pads both sides to the same length before XOR-folding so that length
-/// differences do not reveal information through timing.
+/// Both sides are compared over exactly SECRET_TOKEN_LEN iterations with
+/// 0-padding, so timing is independent of input length or mismatch position.
 pub fn validate_work_secret(provided: &str, expected: &WorkSecret) -> bool {
     let a = provided.as_bytes();
     let b = expected.session_ingress_token.as_bytes();
-    let max_len = a.len().max(b.len());
 
-    // Accumulate mismatches including any length difference.
+    // Accumulate all differences over a fixed-length scan.
     let mut diff: u8 = 0;
-    for i in 0..max_len {
+    for i in 0..SECRET_TOKEN_LEN {
         let x = if i < a.len() { a[i] } else { 0 };
         let y = if i < b.len() { b[i] } else { 0 };
         diff |= x ^ y;
     }
-    // Also flag if lengths differ (handles empty-vs-empty edge case correctly).
-    diff |= (a.len() != b.len()) as u8;
+    // Any extra bytes beyond SECRET_TOKEN_LEN also mark a mismatch.
+    for &byte in a.get(SECRET_TOKEN_LEN..).unwrap_or(&[]) {
+        diff |= byte;
+    }
     diff == 0
 }
 
