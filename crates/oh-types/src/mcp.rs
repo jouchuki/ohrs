@@ -92,6 +92,7 @@ pub enum McpConnectionState {
     Failed,
     Pending,
     Disabled,
+    Disconnected,
 }
 
 /// Runtime status for one MCP server.

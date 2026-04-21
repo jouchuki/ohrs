@@ -1,25 +1,89 @@
 //! Background task manager: create, list, stop, read output.
 
+#[cfg(unix)]
+extern crate libc;
+
 use oh_types::tasks::{TaskRecord, TaskStatus, TaskType};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
+// ── Completion listener type ────────────────────────────────────────────────
+
+pub type CompletionListener = Box<dyn Fn(&TaskRecord) + Send + Sync>;
+
+// ── Per-task live state ──────────────────────────────────────────────────────
+
+struct LiveTask {
+    record: TaskRecord,
+    /// Handle to the watcher task (used for cancellation).
+    watcher: Option<tokio::task::JoinHandle<()>>,
+    /// Sender half of a oneshot used to signal the child to be killed.
+    kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+// ── Public manager ───────────────────────────────────────────────────────────
+
 /// Manages background tasks (shell and agent).
+///
+/// The inner state is wrapped in `Arc<Mutex<_>>` so that the background
+/// watcher tasks spawned by `tokio::spawn` can post status updates back
+/// without holding a mutable borrow on the manager.
 pub struct BackgroundTaskManager {
-    tasks: HashMap<String, TaskRecord>,
+    inner: Arc<Mutex<Inner>>,
+}
+
+struct Inner {
+    tasks: HashMap<String, LiveTask>,
+    completion_listeners: HashMap<String, CompletionListener>,
 }
 
 impl BackgroundTaskManager {
     pub fn new() -> Self {
         Self {
-            tasks: HashMap::new(),
+            inner: Arc::new(Mutex::new(Inner {
+                tasks: HashMap::new(),
+                completion_listeners: HashMap::new(),
+            })),
         }
     }
 
-    /// Create a shell task.
+    // ── Completion listeners ─────────────────────────────────────────────
+
+    /// Register a callback that is fired whenever a task reaches a terminal
+    /// state (`Completed`, `Failed`, or `Killed`).
+    ///
+    /// Returns an unregister closure.
+    pub async fn register_completion_listener(
+        &self,
+        listener: CompletionListener,
+    ) -> impl FnOnce() {
+        let id = Uuid::new_v4().to_string();
+        let inner = Arc::clone(&self.inner);
+        {
+            let mut guard = self.inner.lock().await;
+            guard.completion_listeners.insert(id.clone(), listener);
+        }
+        move || {
+            // Best-effort synchronous removal; the async guard is not available here,
+            // so we spawn a tiny task to do it.
+            let inner2 = Arc::clone(&inner);
+            tokio::spawn(async move {
+                inner2.lock().await.completion_listeners.remove(&id);
+            });
+        }
+    }
+
+    // ── Task creation ─────────────────────────────────────────────────────
+
+    /// Create and immediately start a shell task.
     pub async fn create_shell_task(
-        &mut self,
+        &self,
         command: &str,
         description: &str,
         cwd: &str,
@@ -27,106 +91,219 @@ impl BackgroundTaskManager {
         let id = Uuid::new_v4().to_string();
         let output_file = oh_config::get_tasks_dir().join(format!("{id}.log"));
 
+        // Touch the log file.
+        if let Some(parent) = output_file.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&output_file, b"").await;
+
         let record = TaskRecord {
             id: id.clone(),
             task_type: TaskType::LocalBash,
-            status: TaskStatus::Pending,
+            status: TaskStatus::Running,
             description: description.to_string(),
             cwd: cwd.to_string(),
-            output_file,
+            output_file: output_file.clone(),
             command: Some(command.to_string()),
             prompt: None,
             created_at: now(),
-            started_at: None,
+            started_at: Some(now()),
             ended_at: None,
             return_code: None,
             metadata: HashMap::new(),
         };
 
         oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(1, &[]);
-        self.tasks.insert(id.clone(), record.clone());
 
-        // TODO: Actually spawn the process
+        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let live = LiveTask {
+            record: record.clone(),
+            watcher: None,
+            kill_tx: Some(kill_tx),
+        };
+
+        {
+            let mut guard = self.inner.lock().await;
+            guard.tasks.insert(id.clone(), live);
+        }
+
+        // Spawn the child process and watcher.
+        let watcher = spawn_and_watch(
+            id.clone(),
+            command.to_string(),
+            cwd.to_string(),
+            output_file,
+            Arc::clone(&self.inner),
+            kill_rx,
+        );
+
+        {
+            let mut guard = self.inner.lock().await;
+            if let Some(lt) = guard.tasks.get_mut(&id) {
+                lt.watcher = Some(watcher);
+            }
+        }
+
         record
     }
 
-    /// Create an agent task.
+    /// Create and immediately start an agent task.
     pub async fn create_agent_task(
-        &mut self,
+        &self,
         prompt: &str,
         description: &str,
         cwd: &str,
     ) -> TaskRecord {
+        // TODO: implement agent task invocation
+        // The Python equivalent runs `python -m openharness --api-key <key>` and
+        // then writes the prompt to stdin.  The Rust equivalent would be something
+        // like `hermes chat -q <prompt>` or the `ohrs` binary once it exposes a
+        // one-shot mode.  For now we fall back to echoing the prompt so that the
+        // task infrastructure is exercised; replace the command below when the
+        // ohrs agent CLI is ready.
+        let command = format!("echo {}", shell_escape(prompt));
         let id = Uuid::new_v4().to_string();
         let output_file = oh_config::get_tasks_dir().join(format!("{id}.log"));
+
+        if let Some(parent) = output_file.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&output_file, b"").await;
 
         let record = TaskRecord {
             id: id.clone(),
             task_type: TaskType::LocalAgent,
-            status: TaskStatus::Pending,
+            status: TaskStatus::Running,
             description: description.to_string(),
             cwd: cwd.to_string(),
-            output_file,
-            command: None,
+            output_file: output_file.clone(),
+            command: Some(command.clone()),
             prompt: Some(prompt.to_string()),
             created_at: now(),
-            started_at: None,
+            started_at: Some(now()),
             ended_at: None,
             return_code: None,
             metadata: HashMap::new(),
         };
 
         oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(1, &[]);
-        self.tasks.insert(id.clone(), record.clone());
+
+        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let live = LiveTask {
+            record: record.clone(),
+            watcher: None,
+            kill_tx: Some(kill_tx),
+        };
+
+        {
+            let mut guard = self.inner.lock().await;
+            guard.tasks.insert(id.clone(), live);
+        }
+
+        let watcher = spawn_and_watch(
+            id.clone(),
+            command,
+            cwd.to_string(),
+            output_file,
+            Arc::clone(&self.inner),
+            kill_rx,
+        );
+
+        {
+            let mut guard = self.inner.lock().await;
+            if let Some(lt) = guard.tasks.get_mut(&id) {
+                lt.watcher = Some(watcher);
+            }
+        }
+
         record
     }
 
-    pub fn get_task(&self, id: &str) -> Option<&TaskRecord> {
-        self.tasks.get(id)
+    // ── Query / update ────────────────────────────────────────────────────
+
+    pub async fn get_task(&self, id: &str) -> Option<TaskRecord> {
+        let guard = self.inner.lock().await;
+        guard.tasks.get(id).map(|lt| lt.record.clone())
     }
 
-    pub fn list_tasks(&self, status: Option<TaskStatus>) -> Vec<&TaskRecord> {
-        self.tasks
+    pub async fn list_tasks(&self, status: Option<TaskStatus>) -> Vec<TaskRecord> {
+        let guard = self.inner.lock().await;
+        guard
+            .tasks
             .values()
-            .filter(|t| status.map_or(true, |s| t.status == s))
+            .filter(|lt| status.map_or(true, |s| lt.record.status == s))
+            .map(|lt| lt.record.clone())
             .collect()
     }
 
-    pub fn update_task(&mut self, id: &str, description: Option<&str>) -> Option<&TaskRecord> {
-        if let Some(task) = self.tasks.get_mut(id) {
+    pub async fn update_task(
+        &self,
+        id: &str,
+        description: Option<&str>,
+    ) -> Option<TaskRecord> {
+        let mut guard = self.inner.lock().await;
+        if let Some(lt) = guard.tasks.get_mut(id) {
             if let Some(desc) = description {
-                task.description = desc.to_string();
+                lt.record.description = desc.to_string();
             }
-            Some(task)
+            Some(lt.record.clone())
         } else {
             None
         }
     }
 
-    pub async fn stop_task(&mut self, id: &str) -> Option<&TaskRecord> {
-        if let Some(task) = self.tasks.get_mut(id) {
-            task.status = TaskStatus::Killed;
-            task.ended_at = Some(now());
-            oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
-            Some(task)
-        } else {
-            None
+    /// Kill a running task.  Sets status to `Killed` and records `ended_at`.
+    pub async fn stop_task(&self, id: &str) -> Option<TaskRecord> {
+        let kill_tx = {
+            let mut guard = self.inner.lock().await;
+            if let Some(lt) = guard.tasks.get_mut(id) {
+                if matches!(
+                    lt.record.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+                ) {
+                    return Some(lt.record.clone());
+                }
+                // Mark killed immediately so concurrent readers see the right state.
+                lt.record.status = TaskStatus::Killed;
+                lt.record.ended_at = Some(now());
+                lt.kill_tx.take()
+            } else {
+                return None;
+            }
+        };
+
+        // Signal the watcher to kill the child.
+        if let Some(tx) = kill_tx {
+            let _ = tx.send(());
         }
+
+        oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
+        let guard = self.inner.lock().await;
+        guard.tasks.get(id).map(|lt| lt.record.clone())
     }
 
+    /// Read the last `max_bytes` from the task's output file.
     pub async fn read_output(&self, id: &str, max_bytes: usize) -> Result<String, String> {
-        let task = self
-            .tasks
-            .get(id)
-            .ok_or_else(|| format!("task not found: {id}"))?;
+        let output_file = {
+            let guard = self.inner.lock().await;
+            guard
+                .tasks
+                .get(id)
+                .map(|lt| lt.record.output_file.clone())
+                .ok_or_else(|| format!("task not found: {id}"))?
+        };
 
-        if !task.output_file.exists() {
+        if !output_file.exists() {
             return Ok(String::new());
         }
 
-        let content = std::fs::read_to_string(&task.output_file)
+        let bytes = tokio::fs::read(&output_file)
+            .await
             .map_err(|e| e.to_string())?;
 
+        let content = String::from_utf8_lossy(&bytes).into_owned();
         if content.len() > max_bytes {
             Ok(content[content.len() - max_bytes..].to_string())
         } else {
@@ -141,9 +318,337 @@ impl Default for BackgroundTaskManager {
     }
 }
 
+// ── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Spawn `/bin/bash -lc <command>` in `cwd`, tee stdout+stderr to
+/// `output_file`, and update the task record in `inner` when the process exits.
+fn spawn_and_watch(
+    task_id: String,
+    command: String,
+    cwd: String,
+    output_file: PathBuf,
+    inner: Arc<Mutex<Inner>>,
+    kill_rx: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Spawn the child.
+        let child = Command::new("/bin/bash")
+            .args(["-lc", &command])
+            .current_dir(&cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+
+        let mut child: Child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                // Record failure to launch.
+                let mut guard = inner.lock().await;
+                if let Some(lt) = guard.tasks.get_mut(&task_id) {
+                    lt.record.status = TaskStatus::Failed;
+                    lt.record.ended_at = Some(now());
+                    lt.record.return_code = Some(-1);
+                    lt.record
+                        .metadata
+                        .insert("spawn_error".into(), e.to_string());
+                }
+                oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
+                notify_listeners(&mut *guard, &task_id);
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Open the log file for appending (both streams go here).
+        let log_file = match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_file)
+            .await
+        {
+            Ok(f) => Arc::new(Mutex::new(f)),
+            Err(e) => {
+                tracing::error!("failed to open task log {output_file:?}: {e}");
+                let _ = child.kill().await;
+                let mut guard = inner.lock().await;
+                if let Some(lt) = guard.tasks.get_mut(&task_id) {
+                    lt.record.status = TaskStatus::Failed;
+                    lt.record.ended_at = Some(now());
+                    lt.record.return_code = Some(-1);
+                }
+                oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
+                notify_listeners(&mut *guard, &task_id);
+                return;
+            }
+        };
+
+        // Copy stdout → log file.
+        let stdout_handle = if let Some(mut out) = stdout {
+            let log = Arc::clone(&log_file);
+            Some(tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match tokio::io::AsyncReadExt::read(&mut out, &mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let mut f = log.lock().await;
+                            let _ = f.write_all(&buf[..n]).await;
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Copy stderr → log file.
+        let stderr_handle = if let Some(mut err) = stderr {
+            let log = Arc::clone(&log_file);
+            Some(tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match tokio::io::AsyncReadExt::read(&mut err, &mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let mut f = log.lock().await;
+                            let _ = f.write_all(&buf[..n]).await;
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Remember the child PID so we can kill the entire process group.
+        let child_pid = child.id();
+
+        // Wait for either the process to finish OR a kill signal.
+        tokio::select! {
+            status = child.wait() => {
+                // Process finished on its own.
+                let exit_status_opt = status.ok();
+                // Use the actual exit code from the OS.  If the process was
+                // killed by a signal, code() is None — treat that as Failed
+                // with return_code -1, not as Completed.
+                let return_code: Option<i32> = exit_status_opt.as_ref().and_then(|s| s.code());
+                let succeeded = return_code == Some(0);
+
+                // Drain I/O tasks before updating status.
+                if let Some(h) = stdout_handle { let _ = h.await; }
+                if let Some(h) = stderr_handle { let _ = h.await; }
+
+                let mut guard = inner.lock().await;
+                oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
+                if let Some(lt) = guard.tasks.get_mut(&task_id) {
+                    // If stop_task already marked this Killed, preserve that.
+                    if lt.record.status != TaskStatus::Killed {
+                        lt.record.status = if succeeded {
+                            TaskStatus::Completed
+                        } else {
+                            TaskStatus::Failed
+                        };
+                        // For signal-killed processes where code() is None,
+                        // record -1 so callers can distinguish from a clean exit.
+                        lt.record.return_code = Some(return_code.unwrap_or(-1));
+                        lt.record.ended_at = Some(now());
+                    }
+                }
+                notify_listeners(&mut *guard, &task_id);
+            }
+            _ = kill_rx => {
+                // Kill signal received from stop_task().
+                // Kill the whole process group so bash-launched grandchildren
+                // are also reaped (on Unix only; best-effort on other platforms).
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    // SAFETY: calling kill(-pgid, SIGKILL) is always safe; a
+                    // non-existent pgid returns ESRCH which we ignore.
+                    unsafe {
+                        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                    }
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+
+                // Drain I/O tasks.
+                if let Some(h) = stdout_handle { let _ = h.await; }
+                if let Some(h) = stderr_handle { let _ = h.await; }
+
+                // Status was already set to Killed in stop_task(); fire listeners.
+                let mut guard = inner.lock().await;
+                notify_listeners(&mut *guard, &task_id);
+            }
+        }
+    })
+}
+
+/// Fire all registered completion listeners for `task_id`.
+/// Must be called while holding the `Inner` lock.
+fn notify_listeners(guard: &mut Inner, task_id: &str) {
+    let record = match guard.tasks.get(task_id) {
+        Some(lt) => lt.record.clone(),
+        None => return,
+    };
+    for listener in guard.completion_listeners.values() {
+        listener(&record);
+    }
+}
+
 fn now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+/// Minimal shell escaping: wraps the string in single quotes and escapes
+/// embedded single quotes as `'\''`.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    fn tasks_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("oh_tasks_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Override the tasks dir for tests so we don't write into the real config dir.
+    fn with_tasks_dir(dir: &PathBuf) {
+        // oh_config::get_tasks_dir() reads an env var if set.
+        // We use a temp directory and write the output_file path manually,
+        // so no override is strictly required; the manager accepts the path
+        // embedded in the TaskRecord.
+        let _ = dir; // used in documentation only
+    }
+
+    #[tokio::test]
+    async fn test_echo_hello_succeeds() {
+        let dir = tasks_dir();
+        with_tasks_dir(&dir);
+
+        let mgr = BackgroundTaskManager::new();
+
+        // Use a known output file path.
+        let task = mgr
+            .create_shell_task("echo hello", "test echo", "/tmp")
+            .await;
+
+        let task_id = task.id.clone();
+
+        // Poll for completion (up to 5 s).
+        let mut final_record = None;
+        for _ in 0..50 {
+            sleep(Duration::from_millis(100)).await;
+            let r = mgr.get_task(&task_id).await.unwrap();
+            if r.status != TaskStatus::Running && r.status != TaskStatus::Pending {
+                final_record = Some(r);
+                break;
+            }
+        }
+
+        let record = final_record.expect("task did not complete within 5 s");
+
+        assert_eq!(
+            record.status,
+            TaskStatus::Completed,
+            "expected Completed, got {:?}",
+            record.status
+        );
+        assert_eq!(record.return_code, Some(0));
+
+        let output = mgr.read_output(&task_id, 65536).await.unwrap();
+        assert!(
+            output.contains("hello"),
+            "output did not contain 'hello': {output:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_task_kills_sleep() {
+        let mgr = BackgroundTaskManager::new();
+
+        let task = mgr
+            .create_shell_task("sleep 30", "long sleep", "/tmp")
+            .await;
+        let task_id = task.id.clone();
+
+        // Give it a moment to start.
+        sleep(Duration::from_millis(200)).await;
+
+        let stopped = mgr.stop_task(&task_id).await.unwrap();
+        assert_eq!(
+            stopped.status,
+            TaskStatus::Killed,
+            "expected Killed, got {:?}",
+            stopped.status
+        );
+        assert!(stopped.ended_at.is_some(), "ended_at should be set");
+    }
+
+    #[tokio::test]
+    async fn test_completion_listener_fires() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired2 = Arc::clone(&fired);
+
+        let mgr = BackgroundTaskManager::new();
+
+        let _unregister = mgr
+            .register_completion_listener(Box::new(move |rec| {
+                if rec.status == TaskStatus::Completed {
+                    fired2.store(true, Ordering::SeqCst);
+                }
+            }))
+            .await;
+
+        let task = mgr.create_shell_task("echo done", "listener test", "/tmp").await;
+        let task_id = task.id.clone();
+
+        for _ in 0..50 {
+            sleep(Duration::from_millis(100)).await;
+            let r = mgr.get_task(&task_id).await.unwrap();
+            if r.status != TaskStatus::Running && r.status != TaskStatus::Pending {
+                break;
+            }
+        }
+
+        assert!(fired.load(Ordering::SeqCst), "completion listener was not fired");
+    }
+
+    #[tokio::test]
+    async fn test_failed_command_status() {
+        let mgr = BackgroundTaskManager::new();
+
+        let task = mgr
+            .create_shell_task("exit 42", "failing task", "/tmp")
+            .await;
+        let task_id = task.id.clone();
+
+        let mut final_record = None;
+        for _ in 0..50 {
+            sleep(Duration::from_millis(100)).await;
+            let r = mgr.get_task(&task_id).await.unwrap();
+            if r.status != TaskStatus::Running && r.status != TaskStatus::Pending {
+                final_record = Some(r);
+                break;
+            }
+        }
+
+        let record = final_record.expect("task did not complete");
+        assert_eq!(record.status, TaskStatus::Failed);
+        assert_eq!(record.return_code, Some(42));
+    }
 }

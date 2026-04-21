@@ -9,11 +9,12 @@ description = "MCP client with stdio/http/ws transports for OpenHarness"
 oh-types.workspace = true
 oh-telemetry.workspace = true
 tokio.workspace = true
-reqwest.workspace = true
-tokio-tungstenite.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 opentelemetry.workspace = true
-futures.workspace = true
+rmcp.workspace = true
+http.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

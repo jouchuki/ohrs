@@ -38,6 +38,11 @@ pub struct PermissionSettings {
     pub path_rules: Vec<PathRuleConfig>,
     #[serde(default)]
     pub denied_commands: Vec<String>,
+    /// Glob patterns that explicitly opt specific paths out of the hardcoded
+    /// sensitive-path blocklist.  Use with care — this is an escape hatch for
+    /// cases like reading `~/.ssh/known_hosts` in a CI pipeline.
+    #[serde(default)]
+    pub allow_sensitive_override: Vec<String>,
 }
 
 impl Default for PermissionSettings {
@@ -48,6 +53,7 @@ impl Default for PermissionSettings {
             denied_tools: Vec::new(),
             path_rules: Vec::new(),
             denied_commands: Vec::new(),
+            allow_sensitive_override: Vec::new(),
         }
     }
 }
@@ -81,6 +87,240 @@ impl Default for MemorySettings {
     }
 }
 
+// ── Sandbox ────────────────────────────────────────────────────────────────
+
+/// Which sandbox backend to use.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackendKind {
+    /// No sandboxing.
+    #[default]
+    None,
+    /// Linux Landlock (kernel-level LSM).
+    Landlock,
+    /// Docker container isolation.
+    Docker,
+}
+
+/// OS-level network restrictions passed to sandbox-runtime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxNetworkSettings {
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub denied_domains: Vec<String>,
+}
+
+/// OS-level filesystem restrictions passed to sandbox-runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxFilesystemSettings {
+    #[serde(default)]
+    pub allow_read: Vec<String>,
+    #[serde(default)]
+    pub deny_read: Vec<String>,
+    #[serde(default = "default_allow_write")]
+    pub allow_write: Vec<String>,
+    #[serde(default)]
+    pub deny_write: Vec<String>,
+}
+
+fn default_allow_write() -> Vec<String> {
+    vec![".".into()]
+}
+
+impl Default for SandboxFilesystemSettings {
+    fn default() -> Self {
+        Self {
+            allow_read: Vec::new(),
+            deny_read: Vec::new(),
+            allow_write: default_allow_write(),
+            deny_write: Vec::new(),
+        }
+    }
+}
+
+/// Docker-specific sandbox configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DockerSandboxSettings {
+    #[serde(default = "default_docker_image")]
+    pub image: String,
+    #[serde(default = "default_true")]
+    pub auto_build_image: bool,
+    #[serde(default)]
+    pub cpu_limit: f64,
+    #[serde(default)]
+    pub memory_limit: String,
+    #[serde(default)]
+    pub extra_mounts: Vec<String>,
+    #[serde(default)]
+    pub extra_env: HashMap<String, String>,
+}
+
+fn default_docker_image() -> String {
+    "openharness-sandbox:latest".into()
+}
+
+impl Default for DockerSandboxSettings {
+    fn default() -> Self {
+        Self {
+            image: default_docker_image(),
+            auto_build_image: true,
+            cpu_limit: 0.0,
+            memory_limit: String::new(),
+            extra_mounts: Vec::new(),
+            extra_env: HashMap::new(),
+        }
+    }
+}
+
+/// Sandbox-runtime integration settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend: SandboxBackendKind,
+    #[serde(default)]
+    pub fail_if_unavailable: bool,
+    #[serde(default)]
+    pub enabled_platforms: Vec<String>,
+    #[serde(default)]
+    pub docker: DockerSandboxSettings,
+    #[serde(default)]
+    pub network: SandboxNetworkSettings,
+    #[serde(default)]
+    pub filesystem: SandboxFilesystemSettings,
+}
+
+// ── Provider profiles ──────────────────────────────────────────────────────
+
+/// Named provider workflow configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    /// Unique identifier for the profile (e.g. "claude", "openai").
+    pub id: String,
+    /// User-facing display name.
+    pub name: String,
+    /// Base URL for the provider's API.
+    pub base_url: String,
+    /// Environment variable names to check for auth credentials.
+    #[serde(default)]
+    pub auth_env_vars: Vec<String>,
+    /// List of known model identifiers for this provider.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Maximum context window in tokens (provider-specific).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+    /// Tokens at which auto-compaction is triggered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold_tokens: Option<u32>,
+}
+
+/// Return the 8 built-in provider profiles.
+pub fn builtin_profiles() -> Vec<ProviderProfile> {
+    vec![
+        ProviderProfile {
+            // id matches the default `Settings.provider` value ("anthropic")
+            // so that `effective_context_window()` resolves without configuration.
+            id: "anthropic".into(),
+            name: "Anthropic Claude API".into(),
+            base_url: "https://api.anthropic.com".into(),
+            auth_env_vars: vec!["ANTHROPIC_API_KEY".into()],
+            models: vec![
+                "claude-sonnet-4-6".into(),
+                "claude-opus-4-6".into(),
+                "claude-haiku-4-5".into(),
+            ],
+            context_window_tokens: Some(200_000),
+            auto_compact_threshold_tokens: Some(160_000),
+        },
+        ProviderProfile {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            // Client appends /v1/chat/completions, so base_url must not include /v1.
+            base_url: "https://api.openai.com".into(),
+            auth_env_vars: vec!["OPENAI_API_KEY".into()],
+            models: vec![
+                "gpt-5.4".into(),
+                "gpt-4o".into(),
+                "o3".into(),
+            ],
+            context_window_tokens: Some(128_000),
+            auto_compact_threshold_tokens: Some(100_000),
+        },
+        ProviderProfile {
+            id: "copilot".into(),
+            name: "GitHub Copilot".into(),
+            // GitHub Copilot API root. Note: Copilot uses /chat/completions (no /v1
+            // prefix), so a dedicated Copilot client must NOT append /v1/chat/completions.
+            base_url: "https://api.githubcopilot.com".into(),
+            auth_env_vars: vec!["GITHUB_TOKEN".into()],
+            models: vec!["gpt-5.4".into(), "claude-sonnet-4-6".into()],
+            context_window_tokens: Some(128_000),
+            auto_compact_threshold_tokens: Some(100_000),
+        },
+        ProviderProfile {
+            id: "moonshot".into(),
+            name: "Moonshot (Kimi)".into(),
+            // Client appends /v1/chat/completions, so base_url must not include /v1.
+            base_url: "https://api.moonshot.cn".into(),
+            auth_env_vars: vec!["MOONSHOT_API_KEY".into()],
+            models: vec!["kimi-k2.5".into(), "moonshot-v1-128k".into()],
+            context_window_tokens: Some(128_000),
+            auto_compact_threshold_tokens: Some(100_000),
+        },
+        ProviderProfile {
+            id: "dashscope".into(),
+            name: "Alibaba DashScope".into(),
+            // Client appends /v1/chat/completions; DashScope OpenAI-compat path
+            // is /compatible-mode/v1, so omit the trailing /v1 here.
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode".into(),
+            auth_env_vars: vec!["DASHSCOPE_API_KEY".into()],
+            models: vec!["qwen-max".into(), "qwen-plus".into()],
+            context_window_tokens: Some(32_000),
+            auto_compact_threshold_tokens: Some(25_000),
+        },
+        ProviderProfile {
+            id: "gemini".into(),
+            name: "Google Gemini".into(),
+            // OpenAI-compatible Gemini endpoint; client appends /v1/chat/completions.
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            auth_env_vars: vec!["GEMINI_API_KEY".into(), "GOOGLE_API_KEY".into()],
+            models: vec!["gemini-2.5-flash".into(), "gemini-2.5-pro".into()],
+            context_window_tokens: Some(1_000_000),
+            auto_compact_threshold_tokens: Some(800_000),
+        },
+        ProviderProfile {
+            id: "minimax".into(),
+            name: "MiniMax".into(),
+            // Client appends /v1/chat/completions, so base_url must not include /v1.
+            base_url: "https://api.minimax.chat".into(),
+            auth_env_vars: vec!["MINIMAX_API_KEY".into()],
+            models: vec!["MiniMax-M2.7".into()],
+            context_window_tokens: Some(1_000_000),
+            auto_compact_threshold_tokens: Some(800_000),
+        },
+        ProviderProfile {
+            id: "bedrock".into(),
+            name: "AWS Bedrock".into(),
+            // Bedrock endpoints are region-dependent; use placeholder.
+            base_url: "https://bedrock-runtime.{region}.amazonaws.com".into(),
+            auth_env_vars: vec![
+                "AWS_ACCESS_KEY_ID".into(),
+                "AWS_SECRET_ACCESS_KEY".into(),
+                "AWS_SESSION_TOKEN".into(),
+            ],
+            models: vec![
+                "anthropic.claude-sonnet-4-6-v1:0".into(),
+                "anthropic.claude-opus-4-20250514-v1:0".into(),
+            ],
+            context_window_tokens: Some(200_000),
+            auto_compact_threshold_tokens: Some(160_000),
+        },
+    ]
+}
+
 /// Main settings model for OpenHarness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -93,7 +333,9 @@ pub struct Settings {
     pub model: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub permission: PermissionSettings,
@@ -126,6 +368,18 @@ pub struct Settings {
     /// When true, the Config tool cannot write settings to disk.
     #[serde(default)]
     pub config_readonly: bool,
+    /// Sandbox isolation settings.
+    #[serde(default)]
+    pub sandbox: SandboxSettings,
+    /// Provider profiles (user-defined + built-ins via [`builtin_profiles`]).
+    #[serde(default)]
+    pub provider_profiles: Vec<ProviderProfile>,
+    /// Global default context-window size in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+    /// Global default auto-compaction threshold in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold_tokens: Option<u32>,
 }
 
 fn default_max_turns() -> u32 {
@@ -184,6 +438,10 @@ impl Default for Settings {
             max_turns: default_max_turns(),
             verbose: false,
             config_readonly: false,
+            sandbox: SandboxSettings::default(),
+            provider_profiles: Vec::new(),
+            context_window_tokens: None,
+            auto_compact_threshold_tokens: None,
         }
     }
 }
@@ -247,6 +505,32 @@ impl Settings {
         } else {
             "claude-sonnet-4-6".into()
         }
+    }
+
+    /// Resolve a provider profile by `id`.
+    ///
+    /// Only searches user-defined profiles stored in `self.provider_profiles`.
+    /// Returns `None` when not found there. To look up built-in profiles use
+    /// [`builtin_profiles`] directly, as they are returned by value.
+    pub fn resolve_profile(&self, id: &str) -> Option<&ProviderProfile> {
+        self.provider_profiles.iter().find(|p| p.id == id)
+    }
+
+    /// Return the effective context-window size in tokens.
+    ///
+    /// Resolution order:
+    /// 1. Top-level `context_window_tokens` on this `Settings` instance (global default).
+    /// 2. The matching built-in profile for the current `provider`.
+    /// 3. `None`.
+    pub fn effective_context_window(&self) -> Option<u32> {
+        if let Some(n) = self.context_window_tokens {
+            return Some(n);
+        }
+        // Fall back to the built-in profile matching the current provider.
+        builtin_profiles()
+            .into_iter()
+            .find(|p| p.id == self.provider)
+            .and_then(|p| p.context_window_tokens)
     }
 
     /// Return a new Settings with overrides applied (non-None values only).
@@ -993,5 +1277,272 @@ mod tests {
         std::fs::write(&path, "not valid json {{{").unwrap();
         let err = load_settings(Some(&path)).unwrap_err();
         assert!(matches!(err, SettingsError::ParseError(_)));
+    }
+
+    // ── Sandbox settings ─────────────────────────────────────────
+
+    #[test]
+    fn test_sandbox_defaults() {
+        let s = SandboxSettings::default();
+        assert!(!s.enabled);
+        assert_eq!(s.backend, SandboxBackendKind::None);
+        assert!(!s.fail_if_unavailable);
+        assert!(s.enabled_platforms.is_empty());
+        assert_eq!(s.docker.image, "openharness-sandbox:latest");
+        assert!(s.docker.auto_build_image);
+        assert!(s.network.allowed_domains.is_empty());
+        assert_eq!(s.filesystem.allow_write, vec!["."]);
+    }
+
+    #[test]
+    fn test_sandbox_roundtrip_json() {
+        let original = SandboxSettings {
+            enabled: true,
+            backend: SandboxBackendKind::Docker,
+            fail_if_unavailable: true,
+            enabled_platforms: vec!["linux".into()],
+            docker: DockerSandboxSettings {
+                image: "my-image:v2".into(),
+                memory_limit: "512m".into(),
+                extra_mounts: vec!["/host:/container".into()],
+                ..DockerSandboxSettings::default()
+            },
+            network: SandboxNetworkSettings {
+                allowed_domains: vec!["api.anthropic.com".into()],
+                denied_domains: vec!["evil.example".into()],
+            },
+            filesystem: SandboxFilesystemSettings {
+                allow_read: vec!["/usr/lib".into()],
+                deny_write: vec!["/etc".into()],
+                ..SandboxFilesystemSettings::default()
+            },
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let restored: SandboxSettings = serde_json::from_str(&json).unwrap();
+        assert!(restored.enabled);
+        assert_eq!(restored.backend, SandboxBackendKind::Docker);
+        assert!(restored.fail_if_unavailable);
+        assert_eq!(restored.docker.image, "my-image:v2");
+        assert_eq!(restored.docker.memory_limit, "512m");
+        assert_eq!(restored.docker.extra_mounts, vec!["/host:/container"]);
+        assert_eq!(restored.network.allowed_domains, vec!["api.anthropic.com"]);
+        assert_eq!(restored.network.denied_domains, vec!["evil.example"]);
+        assert_eq!(restored.filesystem.allow_read, vec!["/usr/lib"]);
+        assert_eq!(restored.filesystem.deny_write, vec!["/etc"]);
+    }
+
+    #[test]
+    fn test_minimal_config_parses_to_sandbox_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"model": "test-model"}"#).unwrap();
+        assert!(!s.sandbox.enabled);
+        assert_eq!(s.sandbox.backend, SandboxBackendKind::None);
+        assert!(s.sandbox.network.allowed_domains.is_empty());
+    }
+
+    // ── ProviderProfile / builtin_profiles ──────────────────────
+
+    #[test]
+    fn test_builtin_profiles_returns_eight() {
+        let profiles = builtin_profiles();
+        assert_eq!(profiles.len(), 8, "expected exactly 8 built-in profiles");
+    }
+
+    #[test]
+    fn test_builtin_profile_ids_are_unique() {
+        let profiles = builtin_profiles();
+        let mut ids: Vec<&str> = profiles.iter().map(|p| p.id.as_str()).collect();
+        ids.sort_unstable();
+        let deduped: Vec<&str> = {
+            let mut v = ids.clone();
+            v.dedup();
+            v
+        };
+        assert_eq!(ids.len(), deduped.len(), "profile ids must be unique");
+    }
+
+    #[test]
+    fn test_resolve_profile_moonshot_base_url() {
+        // moonshot is a built-in; not in `provider_profiles` by default.
+        // Use builtin_profiles() directly as documented.
+        let profiles = builtin_profiles();
+        let moonshot = profiles.iter().find(|p| p.id == "moonshot").unwrap();
+        // Base URL without /v1 suffix; client appends /v1/chat/completions.
+        assert_eq!(moonshot.base_url, "https://api.moonshot.cn");
+    }
+
+    #[test]
+    fn test_resolve_profile_user_defined_takes_precedence() {
+        let custom = ProviderProfile {
+            id: "moonshot".into(),
+            name: "Custom Moonshot".into(),
+            base_url: "https://custom.moonshot.example/v1".into(),
+            auth_env_vars: vec!["MY_KEY".into()],
+            models: vec![],
+            context_window_tokens: None,
+            auto_compact_threshold_tokens: None,
+        };
+        let s = Settings {
+            provider_profiles: vec![custom],
+            ..Settings::default()
+        };
+        let resolved = s.resolve_profile("moonshot").unwrap();
+        assert_eq!(resolved.base_url, "https://custom.moonshot.example/v1");
+        assert_eq!(resolved.name, "Custom Moonshot");
+    }
+
+    #[test]
+    fn test_resolve_profile_missing_returns_none() {
+        let s = Settings::default();
+        assert!(s.resolve_profile("nonexistent-provider").is_none());
+    }
+
+    #[test]
+    fn test_provider_profile_roundtrip_json() {
+        let original = ProviderProfile {
+            id: "test-provider".into(),
+            name: "Test Provider".into(),
+            base_url: "https://test.example.com/v1".into(),
+            auth_env_vars: vec!["TEST_API_KEY".into()],
+            models: vec!["model-a".into(), "model-b".into()],
+            context_window_tokens: Some(50_000),
+            auto_compact_threshold_tokens: Some(40_000),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: ProviderProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.base_url, original.base_url);
+        assert_eq!(restored.auth_env_vars, original.auth_env_vars);
+        assert_eq!(restored.models, original.models);
+        assert_eq!(restored.context_window_tokens, Some(50_000));
+        assert_eq!(restored.auto_compact_threshold_tokens, Some(40_000));
+    }
+
+    // ── Context-window tokens ────────────────────────────────────
+
+    #[test]
+    fn test_context_window_tokens_default_none() {
+        let s = Settings::default();
+        assert!(s.context_window_tokens.is_none());
+        assert!(s.auto_compact_threshold_tokens.is_none());
+    }
+
+    #[test]
+    fn test_effective_context_window_global_override() {
+        let s = Settings {
+            context_window_tokens: Some(99_999),
+            ..Settings::default()
+        };
+        assert_eq!(s.effective_context_window(), Some(99_999));
+    }
+
+    #[test]
+    fn test_effective_context_window_from_builtin_profile() {
+        // provider = "anthropic" (the default) should resolve the "anthropic" built-in.
+        let s = Settings::default();
+        assert_eq!(s.provider, "anthropic");
+        assert_eq!(s.effective_context_window(), Some(200_000));
+    }
+
+    #[test]
+    fn test_effective_context_window_no_match_returns_none() {
+        let s = Settings {
+            provider: "unknown-provider".into(),
+            ..Settings::default()
+        };
+        assert_eq!(s.effective_context_window(), None);
+    }
+
+    #[test]
+    fn test_full_settings_with_new_groups_roundtrip() {
+        // Build a Settings that exercises all three new groups.
+        let original = Settings {
+            context_window_tokens: Some(100_000),
+            auto_compact_threshold_tokens: Some(80_000),
+            sandbox: SandboxSettings {
+                enabled: true,
+                backend: SandboxBackendKind::Landlock,
+                network: SandboxNetworkSettings {
+                    allowed_domains: vec!["api.anthropic.com".into()],
+                    ..SandboxNetworkSettings::default()
+                },
+                ..SandboxSettings::default()
+            },
+            provider_profiles: vec![ProviderProfile {
+                id: "custom".into(),
+                name: "Custom Provider".into(),
+                base_url: "https://custom.api/v1".into(),
+                auth_env_vars: vec!["CUSTOM_KEY".into()],
+                models: vec!["model-x".into()],
+                context_window_tokens: Some(32_000),
+                auto_compact_threshold_tokens: Some(25_000),
+            }],
+            ..Settings::default()
+        };
+
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.context_window_tokens, Some(100_000));
+        assert_eq!(restored.auto_compact_threshold_tokens, Some(80_000));
+        assert!(restored.sandbox.enabled);
+        assert_eq!(restored.sandbox.backend, SandboxBackendKind::Landlock);
+        assert_eq!(
+            restored.sandbox.network.allowed_domains,
+            vec!["api.anthropic.com"]
+        );
+        assert_eq!(restored.provider_profiles.len(), 1);
+        assert_eq!(restored.provider_profiles[0].id, "custom");
+        assert_eq!(
+            restored.provider_profiles[0].base_url,
+            "https://custom.api/v1"
+        );
+        assert_eq!(
+            restored.provider_profiles[0].context_window_tokens,
+            Some(32_000)
+        );
+    }
+
+    #[test]
+    fn test_minimal_config_new_groups_default() {
+        // A completely empty JSON should parse to sane defaults for all new groups.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!s.sandbox.enabled);
+        assert_eq!(s.sandbox.backend, SandboxBackendKind::None);
+        assert!(s.provider_profiles.is_empty());
+        assert!(s.context_window_tokens.is_none());
+        assert!(s.auto_compact_threshold_tokens.is_none());
+    }
+
+    // ── Built-in profile base-URL spot-checks ───────────────────
+
+    #[test]
+    fn test_builtin_profile_base_urls() {
+        let profiles = builtin_profiles();
+        let get = |id: &str| {
+            profiles
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.base_url.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        // "anthropic" matches Settings.provider default so effective_context_window resolves.
+        assert_eq!(get("anthropic"), "https://api.anthropic.com");
+        // OpenAI-compatible clients append /v1/chat/completions so base_url omits /v1.
+        assert_eq!(get("openai"), "https://api.openai.com");
+        // Copilot root (uses /chat/completions without /v1 — Copilot client must not append /v1).
+        assert_eq!(get("copilot"), "https://api.githubcopilot.com");
+        assert_eq!(get("moonshot"), "https://api.moonshot.cn");
+        assert_eq!(
+            get("dashscope"),
+            "https://dashscope.aliyuncs.com/compatible-mode"
+        );
+        assert_eq!(
+            get("gemini"),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        assert_eq!(get("minimax"), "https://api.minimax.chat");
+        // Bedrock is region-dependent; just confirm it contains "bedrock-runtime".
+        assert!(get("bedrock").contains("bedrock-runtime"));
     }
 }

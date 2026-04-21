@@ -17,6 +17,8 @@ members = [
     "crates/oh-harness",
     "crates/oh-autopilot",
     "crates/oh-swarm",
+    "crates/oh-auth",
+    "crates/oh-sandbox",
 ]
 
 [workspace.package]
@@ -65,6 +67,23 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # File watching
 notify = "7"
 
+# YAML
+serde_yaml = "0.9"
+
+# Secret handling
+secrecy = "0.10"
+
+# Credentials
+keyring = "3"
+oauth2 = "5"
+
+# Container / sandbox
+bollard = "0.17"
+
+# MCP client SDK
+rmcp = { version = "1.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+http = "1"
+
 # XDG paths
 dirs = "5"
 
@@ -99,6 +118,8 @@ oh-plugins = { path = "crates/oh-plugins" }
 oh-services = { path = "crates/oh-services" }
 oh-autopilot = { path = "crates/oh-autopilot" }
 oh-swarm = { path = "crates/oh-swarm" }
+oh-auth = { path = "crates/oh-auth" }
+oh-sandbox = { path = "crates/oh-sandbox" }
 
 [profile.release]
 lto = true

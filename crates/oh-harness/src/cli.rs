@@ -189,10 +189,12 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
     ));
 
-    // Build system prompt
-    let system_prompt = args
-        .system_prompt
-        .unwrap_or_else(|| "You are a helpful AI coding assistant.".into());
+    // Build system prompt — respects --system-prompt override, --append-system-prompt, --bare
+    let system_prompt: String = oh_services::prompts::PromptBuilder::new(&cwd)
+        .with_override(args.system_prompt.as_deref())
+        .with_append(args.append_system_prompt.as_deref())
+        .bare(args.bare)
+        .build();
 
     // Collect plugin skills before building registry
     let mut skill_registry_map = serde_json::Map::new();
