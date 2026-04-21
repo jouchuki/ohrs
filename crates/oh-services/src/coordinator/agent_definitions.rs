@@ -26,17 +26,20 @@ pub enum AgentDefError {
 // ---------------------------------------------------------------------------
 
 /// Controls which tools an agent is allowed to invoke.
+///
+/// Maps to the Python `tools` + `disallowed_tools` pair, but expressed as a
+/// mutually-exclusive tagged enum for clarity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolPolicy {
     /// All tools are permitted (default when the `tools` key is absent).
     AllowAll,
-    /// Only the listed tools are permitted.
+    /// Only the listed tools are permitted (Python: `tools: [...]`).
     AllowList {
         #[serde(default)]
         list: Vec<String>,
     },
-    /// All tools except the listed ones are permitted.
+    /// All tools except the listed ones are permitted (Python: `disallowed_tools: [...]`).
     DenyList {
         #[serde(default)]
         list: Vec<String>,
@@ -50,6 +53,8 @@ impl Default for ToolPolicy {
 }
 
 /// How the agent should be isolated from the parent process.
+/// Maps to Python `isolation` field with values `"worktree"` | `"remote"` plus
+/// a Rust-native `Subprocess` variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationMode {
@@ -64,6 +69,7 @@ pub enum IsolationMode {
 }
 
 /// Controls whether the agent's memory is shared with the parent session.
+/// Maps to Python `memory` field with values `"user"` | `"project"` | `"local"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
@@ -79,6 +85,29 @@ pub enum MemoryScope {
 // ---------------------------------------------------------------------------
 
 /// Full configuration for a named agent, loaded from a YAML file.
+///
+/// Field mapping to the Python `AgentDefinition` / TypeScript `BaseAgentDefinition`:
+/// - `name`          → `agentType` / file stem
+/// - `description`   → `whenToUse`
+/// - `system_prompt` → `getSystemPrompt()` return value
+/// - `tools`         → `ToolPolicy` (wraps `tools` + `disallowed_tools`)
+/// - `hooks`         → `hooks`
+/// - `color`         → `color`
+/// - `model`         → `model`
+/// - `effort`        → `effort`
+/// - `permission_mode` → `permissionMode`
+/// - `max_turns`     → `maxTurns`
+/// - `skills`        → `skills`
+/// - `mcp_servers`   → `mcpServers`
+/// - `required_mcp_servers` → `requiredMcpServers`
+/// - `background`    → `background`
+/// - `initial_prompt` → `initialPrompt`
+/// - `memory_scope`  → (maps from Python `memory`)
+/// - `isolation_mode` → (maps from Python `isolation`)
+/// - `critical_system_reminder` → `criticalSystemReminder_EXPERIMENTAL`
+/// - `omit_claude_md` → `omitClaudeMd`
+/// - `subagent_type` → routing key
+/// - `source`        → filesystem path
 #[derive(Debug, Clone)]
 pub struct AgentDefinition {
     /// File basename without the `.yaml` extension; used as the lookup key.
@@ -105,6 +134,29 @@ pub struct AgentDefinition {
     pub timeout_seconds: Option<u32>,
     /// The filesystem path the definition was loaded from.
     pub source: PathBuf,
+
+    // --- parity with Python reference ---
+
+    /// Permission mode override (e.g. `"default"`, `"acceptEdits"`, `"bypassPermissions"`).
+    pub permission_mode: Option<String>,
+    /// UI accent color (e.g. `"red"`, `"blue"`, `"green"`).
+    pub color: Option<String>,
+    /// Skill names the agent should load.
+    pub skills: Vec<String>,
+    /// MCP server references or inline configs (arbitrary JSON values).
+    pub mcp_servers: Vec<serde_json::Value>,
+    /// MCP server name patterns that must be present for this agent to be usable.
+    pub required_mcp_servers: Vec<String>,
+    /// Run this agent as a background task by default when spawned.
+    pub background: bool,
+    /// String prepended to the first user turn.
+    pub initial_prompt: Option<String>,
+    /// Short message re-injected at every user turn.
+    pub critical_system_reminder: Option<String>,
+    /// Skip CLAUDE.md injection for this agent.
+    pub omit_claude_md: bool,
+    /// Routing key used by the harness (defaults to `name`).
+    pub subagent_type: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +186,28 @@ struct RawAgentDef {
     max_turns: Option<u32>,
     #[serde(default)]
     timeout_seconds: Option<u32>,
+
+    // --- parity fields ---
+    #[serde(default, alias = "permissionMode")]
+    permission_mode: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default, alias = "mcpServers")]
+    mcp_servers: Vec<serde_json::Value>,
+    #[serde(default, alias = "requiredMcpServers")]
+    required_mcp_servers: Vec<String>,
+    #[serde(default)]
+    background: bool,
+    #[serde(default, alias = "initialPrompt")]
+    initial_prompt: Option<String>,
+    #[serde(default, alias = "criticalSystemReminder")]
+    critical_system_reminder: Option<String>,
+    #[serde(default, alias = "omitClaudeMd")]
+    omit_claude_md: bool,
+    #[serde(default)]
+    subagent_type: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +341,8 @@ impl AgentDefinitionLoader {
             .ok_or("file has no stem")?
             .to_string();
 
+        let subagent_type = raw.subagent_type.unwrap_or_else(|| name.clone());
+
         Ok(AgentDefinition {
             name,
             description: raw.description,
@@ -280,6 +356,16 @@ impl AgentDefinitionLoader {
             max_turns: raw.max_turns,
             timeout_seconds: raw.timeout_seconds,
             source: path.to_path_buf(),
+            permission_mode: raw.permission_mode,
+            color: raw.color,
+            skills: raw.skills,
+            mcp_servers: raw.mcp_servers,
+            required_mcp_servers: raw.required_mcp_servers,
+            background: raw.background,
+            initial_prompt: raw.initial_prompt,
+            critical_system_reminder: raw.critical_system_reminder,
+            omit_claude_md: raw.omit_claude_md,
+            subagent_type,
         })
     }
 }
@@ -334,6 +420,16 @@ isolation_mode: worktree
 memory_scope: isolated
 max_turns: 50
 timeout_seconds: 600
+permission_mode: acceptEdits
+color: blue
+skills: [git, review]
+mcp_servers:
+  - github
+background: false
+initial_prompt: "Start by reading the PR diff."
+critical_system_reminder: "Be thorough."
+omit_claude_md: true
+subagent_type: pr-reviewer
 "#,
         );
 
@@ -352,6 +448,7 @@ isolation_mode: subprocess
 memory_scope: inherit
 max_turns: 10
 timeout_seconds: 120
+background: true
 "#,
         );
 
@@ -375,6 +472,15 @@ timeout_seconds: 120
         assert_eq!(foo.max_turns, Some(50));
         assert_eq!(foo.timeout_seconds, Some(600));
         assert!(!foo.hooks.is_empty());
+        assert_eq!(foo.permission_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(foo.color.as_deref(), Some("blue"));
+        assert_eq!(foo.skills, vec!["git".to_string(), "review".to_string()]);
+        assert_eq!(foo.mcp_servers.len(), 1);
+        assert!(!foo.background);
+        assert_eq!(foo.initial_prompt.as_deref(), Some("Start by reading the PR diff."));
+        assert_eq!(foo.critical_system_reminder.as_deref(), Some("Be thorough."));
+        assert!(foo.omit_claude_md);
+        assert_eq!(foo.subagent_type, "pr-reviewer");
 
         let bar = registry.get("bar").expect("bar should be loaded");
         assert_eq!(bar.name, "bar");
@@ -386,6 +492,9 @@ timeout_seconds: 120
                 list: vec!["bash".to_string()]
             }
         );
+        assert!(bar.background);
+        // subagent_type should default to name when absent
+        assert_eq!(bar.subagent_type, "bar");
 
         assert_eq!(registry.list().len(), 2);
     }
@@ -420,6 +529,16 @@ description: Minimal agent
         assert!(def.max_turns.is_none());
         assert!(def.timeout_seconds.is_none());
         assert!(def.hooks.is_empty());
+        assert!(def.permission_mode.is_none());
+        assert!(def.color.is_none());
+        assert!(def.skills.is_empty());
+        assert!(def.mcp_servers.is_empty());
+        assert!(def.required_mcp_servers.is_empty());
+        assert!(!def.background);
+        assert!(def.initial_prompt.is_none());
+        assert!(def.critical_system_reminder.is_none());
+        assert!(!def.omit_claude_md);
+        assert_eq!(def.subagent_type, "minimal", "subagent_type should default to name");
     }
 
     // -----------------------------------------------------------------------
@@ -567,5 +686,42 @@ model: project-model
         let mut names = registry.names();
         names.sort();
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: camelCase aliases work (mcpServers, permissionMode, etc.)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_camel_case_aliases() {
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        write_yaml(
+            &agents_dir,
+            "camel",
+            r#"
+description: Camel case test
+permissionMode: bypassPermissions
+mcpServers:
+  - my-server
+requiredMcpServers:
+  - required-server
+initialPrompt: "Hello camel"
+criticalSystemReminder: "Important"
+omitClaudeMd: true
+"#,
+        );
+
+        let loader = AgentDefinitionLoader::with_roots(vec![agents_dir.clone()]);
+        let registry = run(loader.load_all()).unwrap();
+
+        let def = registry.get("camel").expect("camel should load");
+        assert_eq!(def.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(def.mcp_servers.len(), 1);
+        assert_eq!(def.required_mcp_servers, vec!["required-server".to_string()]);
+        assert_eq!(def.initial_prompt.as_deref(), Some("Hello camel"));
+        assert_eq!(def.critical_system_reminder.as_deref(), Some("Important"));
+        assert!(def.omit_claude_md);
     }
 }
