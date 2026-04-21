@@ -258,14 +258,36 @@ impl CronStore {
     }
 
     /// Atomically write a job to disk using temp-file + rename.
+    ///
+    /// Uses a unique temp filename (includes a random suffix) to avoid races
+    /// between concurrent writers for the same job.  The temp file is fsynced
+    /// before the rename so the data is durable if the rename itself succeeds.
     pub async fn put(&self, job: &CronJob) -> Result<(), CronError> {
+        use std::os::unix::io::AsRawFd;
+
         let target = self.job_path(&job.id);
         let dir = target.parent().unwrap_or(&self.root);
 
-        // Write to a temp file in the same directory, then rename.
-        let tmp_path = dir.join(format!(".{}.tmp", job.id));
+        // Unique temp path: include a random token to prevent concurrent-writer races.
+        let rand_suffix: u64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            SystemTime::now().hash(&mut h);
+            std::thread::current().id().hash(&mut h);
+            h.finish()
+        };
+        let tmp_path = dir.join(format!(".{}.{:016x}.tmp", job.id, rand_suffix));
         let bytes = serde_json::to_vec_pretty(job)?;
-        tokio::fs::write(&tmp_path, &bytes).await?;
+
+        // Write + fsync the temp file, then rename (atomic visibility + durability).
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(&bytes)?;
+            // fsync ensures data is on-disk before the rename commits.
+            unsafe { libc::fsync(file.as_raw_fd()) };
+        }
         tokio::fs::rename(&tmp_path, &target).await?;
         Ok(())
     }
@@ -422,6 +444,10 @@ impl CronScheduler {
 }
 
 /// Per-job loop: sleep until next_run, fire, update, repeat.
+///
+/// For interval-based schedules the next deadline is computed from the
+/// *scheduled* deadline (not from wall-clock `now()` after fire completes).
+/// This prevents cumulative drift when `runner.fire` takes non-trivial time.
 async fn job_loop(store: Arc<CronStore>, runner: Arc<dyn CronRunner>, mut job: CronJob) {
     loop {
         // Determine when to next fire.
@@ -436,12 +462,24 @@ async fn job_loop(store: Arc<CronStore>, runner: Arc<dyn CronRunner>, mut job: C
         let fire_at = system_time_to_instant(next);
         tokio::time::sleep_until(fire_at).await;
 
+        // Record actual wall-clock time at fire for `last_run`.
+        let fired_at = SystemTime::now();
+
         // Fire the job (ignore runner errors — log in production).
         let _ = runner.fire(&job).await;
 
         // Update last_run and next_run.
-        job.last_run = Some(SystemTime::now());
-        job.next_run = compute_next_run(&job.schedule, job.last_run).ok();
+        // For intervals we use the *scheduled deadline* (`next`) as the base
+        // so the next fire stays aligned to the original cadence (no drift).
+        // For cron expressions the base is ignored; compute_next_run uses Utc::now().
+        job.last_run = Some(fired_at);
+        job.next_run = match &job.schedule {
+            CronSchedule::Interval(d) => {
+                // next deadline = scheduled fire time + interval  (non-drifting)
+                Some(next + *d)
+            }
+            CronSchedule::Cron(_) => compute_next_run(&job.schedule, job.last_run).ok(),
+        };
 
         // Reload from store to pick up any external changes (enabled flag, etc.).
         if let Ok(Some(fresh)) = store.get(&job.id).await {
