@@ -19,10 +19,14 @@ thiserror.workspace = true
 regex.workspace = true
 dirs.workspace = true
 tempfile.workspace = true
+async-trait.workspace = true
+getrandom = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
