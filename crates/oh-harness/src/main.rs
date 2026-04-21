@@ -1,8 +1,6 @@
 //! OpenHarness CLI — an AI-powered coding assistant.
 
 mod cli;
-mod commands;
-mod host;
 mod ui;
 
 use clap::Parser;
