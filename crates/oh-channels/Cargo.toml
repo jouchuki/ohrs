@@ -1,0 +1,43 @@
+[package]
+name = "oh-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Channel adapters for OpenHarness (Slack Events API, MessageBus, etc.)"
+
+[dependencies]
+# Async
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP client (outbound Slack API)
+reqwest = { workspace = true }
+
+# HTTP server (inbound Slack Events webhook)
+axum = { workspace = true }
+tower = { workspace = true }
+tokio-stream = { workspace = true }
+
+# HMAC-SHA256 for Slack signature verification
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }

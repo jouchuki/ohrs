@@ -19,6 +19,7 @@ members = [
     "crates/oh-swarm",
     "crates/oh-auth",
     "crates/oh-sandbox",
+    "crates/oh-channels",
 ]
 
 [workspace.package]
@@ -102,8 +103,19 @@ syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 
+# Channel adapters
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+tower = { version = "0.4", features = ["util"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
+tokio-stream = { version = "0.1", features = ["sync"] }
+wiremock = "0.6"
+
 # Internal crates
 oh-types = { path = "crates/oh-types" }
+oh-channels = { path = "crates/oh-channels" }
 oh-plugin-abi = { path = "crates/oh-plugin-abi" }
 oh-plugin-derive = { path = "crates/oh-plugin-derive" }
 oh-telemetry = { path = "crates/oh-telemetry" }
