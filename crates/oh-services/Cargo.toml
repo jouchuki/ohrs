@@ -15,3 +15,4 @@ serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+getrandom = "0.2"

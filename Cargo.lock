@@ -1468,6 +1468,7 @@ dependencies = [
 name = "oh-services"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "oh-config",
  "oh-telemetry",
  "oh-types",

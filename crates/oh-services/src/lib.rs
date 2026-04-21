@@ -10,3 +10,8 @@ pub mod coordinator;
 pub mod skills;
 pub mod prompts;
 pub mod token_estimation;
+
+pub use bridge::{
+    BridgeError, BridgeManager, BridgeSessionState,
+    generate_work_secret, validate_work_secret,
+};
