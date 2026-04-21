@@ -1,4 +1,6 @@
-//! Minimal coordinator/team registry — direct port of Python.
+//! Coordinator: team registry (direct port) + YAML agent definitions loader.
+
+pub mod agent_definitions;
 
 use oh_types::coordinator::TeamRecord;
 use std::collections::HashMap;
