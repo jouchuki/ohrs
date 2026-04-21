@@ -259,16 +259,22 @@ impl CronStore {
 
     /// Atomically write a job to disk using temp-file + rename.
     ///
-    /// Uses a unique temp filename (includes a random suffix) to avoid races
-    /// between concurrent writers for the same job.  The temp file is fsynced
-    /// before the rename so the data is durable if the rename itself succeeds.
+    /// Full durability protocol:
+    /// 1. Write serialized JSON to a uniquely-named temp file in the same directory.
+    /// 2. `fsync` the temp file so content survives a crash before rename.
+    /// 3. `rename` temp → target (atomic on POSIX).
+    /// 4. `fsync` the parent directory so the rename itself is durable.
+    ///
+    /// The unique temp filename (random suffix) prevents concurrent puts for the
+    /// same job from stomping each other's temp file.
     pub async fn put(&self, job: &CronJob) -> Result<(), CronError> {
+        use std::io::Write;
         use std::os::unix::io::AsRawFd;
 
         let target = self.job_path(&job.id);
-        let dir = target.parent().unwrap_or(&self.root);
+        let dir = target.parent().unwrap_or(&self.root).to_path_buf();
 
-        // Unique temp path: include a random token to prevent concurrent-writer races.
+        // Unique temp path: random suffix prevents concurrent-writer collisions.
         let rand_suffix: u64 = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -280,15 +286,34 @@ impl CronStore {
         let tmp_path = dir.join(format!(".{}.{:016x}.tmp", job.id, rand_suffix));
         let bytes = serde_json::to_vec_pretty(job)?;
 
-        // Write + fsync the temp file, then rename (atomic visibility + durability).
+        // Step 1+2: write content and fsync the file.
         {
-            use std::io::Write;
             let mut file = std::fs::File::create(&tmp_path)?;
             file.write_all(&bytes)?;
-            // fsync ensures data is on-disk before the rename commits.
-            unsafe { libc::fsync(file.as_raw_fd()) };
+            file.flush()?;
+            // fsync: return value checked; propagate I/O error on failure.
+            let rc = unsafe { libc::fsync(file.as_raw_fd()) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                // best-effort cleanup
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(CronError::Io(err));
+            }
         }
+
+        // Step 3: atomic rename.
         tokio::fs::rename(&tmp_path, &target).await?;
+
+        // Step 4: fsync the directory so the rename is durable.
+        // Open the directory for sync only; errors are propagated.
+        {
+            let dir_fd = std::fs::File::open(&dir)?;
+            let rc = unsafe { libc::fsync(dir_fd.as_raw_fd()) };
+            if rc != 0 {
+                return Err(CronError::Io(std::io::Error::last_os_error()));
+            }
+        }
+
         Ok(())
     }
 
