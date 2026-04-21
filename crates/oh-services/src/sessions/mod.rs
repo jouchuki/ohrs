@@ -47,11 +47,16 @@ impl SessionStatus {
         }
     }
 
-    fn from_str(s: &str) -> Self {
+    fn from_str(s: &str) -> rusqlite::Result<Self> {
         match s {
-            "archived" => SessionStatus::Archived,
-            "deleted" => SessionStatus::Deleted,
-            _ => SessionStatus::Active,
+            "active" => Ok(SessionStatus::Active),
+            "archived" => Ok(SessionStatus::Archived),
+            "deleted" => Ok(SessionStatus::Deleted),
+            other => Err(rusqlite::Error::InvalidColumnType(
+                7,
+                format!("unknown SessionStatus '{other}'"),
+                rusqlite::types::Type::Text,
+            )),
         }
     }
 }
@@ -75,12 +80,17 @@ impl MessageRole {
         }
     }
 
-    fn from_str(s: &str) -> Self {
+    fn from_str(s: &str) -> rusqlite::Result<Self> {
         match s {
-            "assistant" => MessageRole::Assistant,
-            "tool" => MessageRole::Tool,
-            "system" => MessageRole::System,
-            _ => MessageRole::User,
+            "user" => Ok(MessageRole::User),
+            "assistant" => Ok(MessageRole::Assistant),
+            "tool" => Ok(MessageRole::Tool),
+            "system" => Ok(MessageRole::System),
+            other => Err(rusqlite::Error::InvalidColumnType(
+                2,
+                format!("unknown MessageRole '{other}'"),
+                rusqlite::types::Type::Text,
+            )),
         }
     }
 }
@@ -159,22 +169,24 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS sessions(
-    id           TEXT PRIMARY KEY,
-    name         TEXT,
-    project_root TEXT NOT NULL,
-    model        TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL,
+    id            TEXT PRIMARY KEY,
+    name          TEXT,
+    project_root  TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
     message_count INTEGER NOT NULL DEFAULT 0,
-    status       TEXT NOT NULL DEFAULT 'active'
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK(status IN ('active','archived','deleted'))
 );
 
 CREATE TABLE IF NOT EXISTS messages(
     id         TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
-    role       TEXT NOT NULL,
+    role       TEXT NOT NULL
+               CHECK(role IN ('user','assistant','tool','system')),
     content    TEXT NOT NULL,
-    seq        INTEGER NOT NULL,
+    seq        INTEGER NOT NULL CHECK(seq >= 0),
     created_at INTEGER NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     UNIQUE(session_id, seq)
@@ -221,6 +233,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     let project_root: String = row.get(2)?;
     let created_at: i64 = row.get(4)?;
     let updated_at: i64 = row.get(5)?;
+    let message_count_raw: i64 = row.get(6)?;
     let status_str: String = row.get(7)?;
     Ok(SessionRecord {
         id: row.get(0)?,
@@ -229,22 +242,28 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         model: row.get(3)?,
         created_at: secs_to_system_time(created_at),
         updated_at: secs_to_system_time(updated_at),
-        message_count: row.get::<_, i64>(6)? as u32,
-        status: SessionStatus::from_str(&status_str),
+        message_count: message_count_raw.max(0) as u32,
+        status: SessionStatus::from_str(&status_str)?,
     })
 }
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMessage> {
-    let content_str: String = row.get(3)?;
-    let created_at: i64 = row.get(5)?;
     let role_str: String = row.get(2)?;
+    let content_str: String = row.get(3)?;
+    let seq_raw: i64 = row.get(4)?;
+    let created_at: i64 = row.get(5)?;
     Ok(SessionMessage {
         id: row.get(0)?,
         session_id: row.get(1)?,
-        role: MessageRole::from_str(&role_str),
-        content: serde_json::from_str(&content_str)
-            .unwrap_or(serde_json::Value::String(content_str)),
-        seq: row.get::<_, i64>(4)? as u64,
+        role: MessageRole::from_str(&role_str)?,
+        content: serde_json::from_str(&content_str).map_err(|e| {
+            rusqlite::Error::InvalidColumnType(
+                3,
+                format!("invalid JSON content: {e}"),
+                rusqlite::types::Type::Text,
+            )
+        })?,
+        seq: seq_raw.max(0) as u64,
         created_at: secs_to_system_time(created_at),
     })
 }
