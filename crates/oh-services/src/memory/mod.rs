@@ -90,14 +90,25 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
-    /// Resolve `~/.claude/projects/<slug>/memory/`; create the directory.
+    /// Resolve the memory root.
+    ///
+    /// Resolution order:
+    /// 1. `$OPENHARNESSRS_DATA_DIR/memory/` if the env var is set (per-job isolation
+    ///    when ohrs is spawned as a subprocess by a platform like capelle).
+    /// 2. `$OPENHARNESS_DATA_DIR/memory/` (legacy env var).
+    /// 3. `~/.claude/projects/<slug>/memory/` (default for local CLI use).
     pub fn new(project_slug: &str) -> Result<Self, MemoryError> {
-        let home = dirs::home_dir().ok_or(MemoryError::NoHomeDir)?;
-        let root = home
-            .join(".claude")
-            .join("projects")
-            .join(project_slug)
-            .join("memory");
+        let root = if let Ok(data_dir) = std::env::var("OPENHARNESSRS_DATA_DIR") {
+            PathBuf::from(data_dir).join("memory")
+        } else if let Ok(data_dir) = std::env::var("OPENHARNESS_DATA_DIR") {
+            PathBuf::from(data_dir).join("memory")
+        } else {
+            let home = dirs::home_dir().ok_or(MemoryError::NoHomeDir)?;
+            home.join(".claude")
+                .join("projects")
+                .join(project_slug)
+                .join("memory")
+        };
         std::fs::create_dir_all(&root)?;
         Ok(Self { root })
     }

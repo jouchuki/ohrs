@@ -83,6 +83,18 @@ pub struct Args {
     /// Save full action trajectory to a JSONL file
     #[arg(long)]
     pub trajectory: Option<String>,
+
+    /// Set the working directory for this run (cwd is normally inherited from the parent).
+    /// All file tools, the bash tool, and hooks will execute from this directory.
+    /// Mutually exclusive with --tempdir.
+    #[arg(long, conflicts_with = "tempdir")]
+    pub cwd: Option<String>,
+
+    /// Create a fresh temporary directory and use it as cwd for this run.
+    /// The directory is deleted automatically when the process exits.
+    /// Mutually exclusive with --cwd.
+    #[arg(long)]
+    pub tempdir: bool,
 }
 
 /// Main CLI entry point.
@@ -137,8 +149,25 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut hook_registry = HookRegistry::new();
     hook_registry.merge_from_map(&settings.hooks);
 
+    // Resolve cwd:
+    //   --cwd <path>  → use that path
+    //   --tempdir     → fresh tempdir, RAII-cleaned on process exit
+    //   neither       → inherit from parent
+    let (cwd, _tempdir_guard) = if let Some(custom) = args.cwd.as_deref() {
+        let p = PathBuf::from(custom);
+        std::fs::create_dir_all(&p).ok();
+        (p, None)
+    } else if args.tempdir {
+        let td = tempfile::TempDir::new()?;
+        let p = td.path().to_path_buf();
+        (p, Some(td))
+    } else {
+        (std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), None)
+    };
+    // Make subprocesses + relative-path tools inherit it.
+    std::env::set_current_dir(&cwd).ok();
+
     // Load plugins
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let plugins = oh_plugins::load_all_plugins(&cwd, &settings.enabled_plugins);
     for plugin in &plugins {
         if plugin.enabled {
