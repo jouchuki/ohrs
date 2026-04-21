@@ -99,6 +99,9 @@ pub async fn run_query(
                         final_message = Some(complete.message);
                         usage = complete.usage;
                     }
+                    Ok(ApiStreamEvent::ToolUseDelta(_)) => {
+                        // Tool-use delta events are not yet processed; skip.
+                    }
                     Err(e) => {
                         return Err(EngineError::ApiError(e.to_string()));
                     }

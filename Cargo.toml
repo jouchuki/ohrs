@@ -15,6 +15,8 @@ members = [
     "crates/oh-plugins",
     "crates/oh-services",
     "crates/oh-harness",
+    "crates/oh-autopilot",
+    "crates/oh-swarm",
 ]
 
 [workspace.package]
@@ -73,6 +75,9 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 anyhow = "1"
 
+# Testing utilities
+tempfile = "3"
+
 # Proc macro helpers
 syn = { version = "2", features = ["full"] }
 quote = "1"
@@ -92,6 +97,8 @@ oh-tools = { path = "crates/oh-tools" }
 oh-engine = { path = "crates/oh-engine" }
 oh-plugins = { path = "crates/oh-plugins" }
 oh-services = { path = "crates/oh-services" }
+oh-autopilot = { path = "crates/oh-autopilot" }
+oh-swarm = { path = "crates/oh-swarm" }
 
 [profile.release]
 lto = true

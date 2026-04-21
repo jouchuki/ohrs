@@ -1,21 +1,25 @@
-//! OpenAI-compatible API client with streaming and retry.
+//! OpenAI-compatible API client with incremental SSE streaming.
 //!
 //! Translates between OpenHarness's internal Anthropic-style message format
-//! and the OpenAI Chat Completions API.
+//! and the OpenAI Chat Completions API (`POST /v1/chat/completions`).
+//!
+//! Emits `ApiStreamEvent::TextDelta` and `ApiStreamEvent::ToolUseDelta` as
+//! chunks arrive, then a final `ApiStreamEvent::MessageComplete`.
 
 use std::pin::Pin;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use oh_types::api::*;
-use oh_types::messages::{
-    ContentBlock, ConversationMessage, Role, TextBlock, ToolUseBlock,
-};
+use oh_types::messages::{ContentBlock, ConversationMessage, Role};
+#[cfg(test)]
+use oh_types::messages::{TextBlock, ToolUseBlock};
 use opentelemetry::KeyValue;
 use tracing::{info_span, warn, Instrument};
 
 use crate::client::StreamingApiClient;
+use crate::sse::stream_openai_chat;
 
 /// OpenAI Chat Completions API client.
 pub struct OpenAiApiClient {
@@ -36,107 +40,68 @@ impl OpenAiApiClient {
         }
     }
 
-    /// Single attempt at calling the Chat Completions endpoint.
-    async fn complete_once(
+    /// Send one streaming request to the Chat Completions endpoint.
+    ///
+    /// Returns the raw `reqwest::Response` on success so the caller can drive
+    /// the SSE byte stream directly.
+    async fn send_stream_request(
         &self,
         request: &ApiMessageRequest,
-    ) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError> {
-        let span = info_span!("openai_api_request", model = %request.model);
+    ) -> Result<reqwest::Response, ApiError> {
+        // Build the messages array in OpenAI format.
+        let mut oai_messages: Vec<serde_json::Value> = Vec::new();
 
-        async {
-            let start = Instant::now();
-
-            // Build the messages array in OpenAI format.
-            let mut oai_messages: Vec<serde_json::Value> = Vec::new();
-
-            // System prompt → system message
-            if let Some(ref sys) = request.system_prompt {
-                oai_messages.push(serde_json::json!({
-                    "role": "system",
-                    "content": sys,
-                }));
-            }
-
-            // Convert each internal message
-            for msg in &request.messages {
-                convert_message_to_openai(msg, &mut oai_messages);
-            }
-
-            let mut body = serde_json::json!({
-                "model": request.model,
-                "max_completion_tokens": request.max_tokens,
-                "messages": oai_messages,
-            });
-
-            // Convert tools from Anthropic format to OpenAI function-calling format
-            if !request.tools.is_empty() {
-                let oai_tools: Vec<serde_json::Value> = request
-                    .tools
-                    .iter()
-                    .map(convert_tool_to_openai)
-                    .collect();
-                body["tools"] = serde_json::json!(oai_tools);
-            }
-
-            let response = self
-                .http
-                .post(format!("{}/v1/chat/completions", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| ApiError::Network(e.to_string()))?;
-
-            let status = response.status().as_u16();
-            if !response.status().is_success() {
-                let text = response.text().await.unwrap_or_default();
-                if status == 401 || status == 403 {
-                    return Err(ApiError::Authentication(text));
-                }
-                if status == 429 {
-                    return Err(ApiError::RateLimit(text));
-                }
-                return Err(ApiError::Request(format!("status {status}: {text}")));
-            }
-
-            let resp_text = response
-                .text()
-                .await
-                .map_err(|e| ApiError::Network(e.to_string()))?;
-
-            let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
-                .map_err(|e| ApiError::Request(format!("invalid JSON: {e}")))?;
-
-            let (message, usage, stop_reason) = parse_openai_response(&resp_json)?;
-
-            let elapsed = start.elapsed().as_secs_f64();
-            oh_telemetry::API_REQUEST_DURATION.record(
-                elapsed,
-                &[
-                    KeyValue::new("model", request.model.clone()),
-                    KeyValue::new("status", "ok"),
-                ],
-            );
-            oh_telemetry::TOKEN_USAGE_TOTAL.add(
-                usage.input_tokens,
-                &[
-                    KeyValue::new("model", request.model.clone()),
-                    KeyValue::new("direction", "input"),
-                ],
-            );
-            oh_telemetry::TOKEN_USAGE_TOTAL.add(
-                usage.output_tokens,
-                &[
-                    KeyValue::new("model", request.model.clone()),
-                    KeyValue::new("direction", "output"),
-                ],
-            );
-
-            Ok((message, usage, stop_reason))
+        if let Some(ref sys) = request.system_prompt {
+            oai_messages.push(serde_json::json!({
+                "role": "system",
+                "content": sys,
+            }));
         }
-        .instrument(span)
-        .await
+
+        for msg in &request.messages {
+            convert_message_to_openai(msg, &mut oai_messages);
+        }
+
+        let mut body = serde_json::json!({
+            "model": request.model,
+            "max_completion_tokens": request.max_tokens,
+            "messages": oai_messages,
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        });
+
+        if !request.tools.is_empty() {
+            let oai_tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(convert_tool_to_openai)
+                .collect();
+            body["tools"] = serde_json::json!(oai_tools);
+        }
+
+        let response = self
+            .http
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            if status == 401 || status == 403 {
+                return Err(ApiError::Authentication(text));
+            }
+            if status == 429 {
+                return Err(ApiError::RateLimit(text));
+            }
+            return Err(ApiError::Request(format!("status {status}: {text}")));
+        }
+
+        Ok(response)
     }
 }
 
@@ -150,18 +115,56 @@ impl StreamingApiClient for OpenAiApiClient {
         ApiError,
     > {
         let mut last_error: Option<ApiError> = None;
+        let start = Instant::now();
 
         for attempt in 0..=MAX_RETRIES {
-            match self.complete_once(&request).await {
-                Ok((message, usage, stop_reason)) => {
-                    let events = vec![Ok(ApiStreamEvent::MessageComplete(
-                        ApiMessageCompleteEvent {
-                            message,
-                            usage,
-                            stop_reason,
-                        },
-                    ))];
-                    return Ok(Box::pin(futures::stream::iter(events)));
+            let span = info_span!("openai_api_request", model = %request.model);
+            let result = async {
+                self.send_stream_request(&request).await
+            }
+            .instrument(span)
+            .await;
+
+            match result {
+                Ok(response) => {
+                    let model = request.model.clone();
+                    let elapsed_start = start;
+
+                    let byte_stream = response
+                        .bytes_stream()
+                        .map(|r| r.map_err(|e| e.to_string()));
+
+                    let event_stream = stream_openai_chat(byte_stream).map(move |ev| {
+                        // Record telemetry when MessageComplete arrives.
+                        if let Ok(ApiStreamEvent::MessageComplete(ref e)) = ev {
+                            let elapsed = elapsed_start.elapsed().as_secs_f64();
+                            oh_telemetry::API_REQUEST_DURATION.record(
+                                elapsed,
+                                &[
+                                    KeyValue::new("model", model.clone()),
+                                    KeyValue::new("status", "ok"),
+                                ],
+                            );
+                            oh_telemetry::TOKEN_USAGE_TOTAL.add(
+                                e.usage.input_tokens,
+                                &[
+                                    KeyValue::new("model", model.clone()),
+                                    KeyValue::new("direction", "input"),
+                                ],
+                            );
+                            oh_telemetry::TOKEN_USAGE_TOTAL.add(
+                                e.usage.output_tokens,
+                                &[
+                                    KeyValue::new("model", model.clone()),
+                                    KeyValue::new("direction", "output"),
+                                ],
+                            );
+                        }
+                        ev
+                    });
+
+                    return Ok(Box::pin(event_stream)
+                        as Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>);
                 }
                 Err(e) => {
                     if attempt >= MAX_RETRIES || !is_retryable(&e) {
@@ -297,6 +300,9 @@ fn convert_tool_to_openai(tool: &serde_json::Value) -> serde_json::Value {
 }
 
 /// Parse an OpenAI Chat Completions JSON response into internal types.
+///
+/// Used in unit tests to verify response parsing independently of HTTP.
+#[cfg(test)]
 fn parse_openai_response(
     resp: &serde_json::Value,
 ) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError> {
@@ -707,5 +713,77 @@ mod tests {
     #[test]
     fn test_is_retryable_authentication_false() {
         assert!(!is_retryable(&ApiError::Authentication("bad key".into())));
+    }
+
+    // ── incremental SSE streaming (stream_openai_chat) ─────────────
+
+    #[tokio::test]
+    async fn test_openai_sse_text_delta_before_complete() {
+        use crate::sse::stream_openai_chat;
+        use futures::StreamExt;
+
+        let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n")),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let events: Vec<_> = stream_openai_chat(stream).collect().await;
+
+        // At least one TextDelta before MessageComplete
+        let text_deltas: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Ok(ApiStreamEvent::TextDelta(_))))
+            .collect();
+        assert!(!text_deltas.is_empty(), "expected at least one TextDelta");
+
+        let complete = events.last().unwrap();
+        match complete {
+            Ok(ApiStreamEvent::MessageComplete(e)) => {
+                assert_eq!(e.message.text(), "Hello world");
+                assert_eq!(e.stop_reason.as_deref(), Some("end_turn"));
+            }
+            other => panic!("expected MessageComplete as last event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openai_sse_tool_use_delta_before_complete() {
+        use crate::sse::stream_openai_chat;
+        use futures::StreamExt;
+
+        let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n")),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let events: Vec<_> = stream_openai_chat(stream).collect().await;
+
+        let tool_deltas: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Ok(ApiStreamEvent::ToolUseDelta(_))))
+            .collect();
+        assert!(!tool_deltas.is_empty(), "expected at least one ToolUseDelta");
+
+        match events.last().unwrap() {
+            Ok(ApiStreamEvent::MessageComplete(e)) => {
+                assert_eq!(e.stop_reason.as_deref(), Some("tool_use"));
+                assert_eq!(e.message.tool_uses().len(), 1);
+                assert_eq!(e.message.tool_uses()[0].name, "bash");
+            }
+            other => panic!("expected MessageComplete as last event, got {:?}", other),
+        }
     }
 }

@@ -175,10 +175,13 @@ impl CodexApiClient {
     }
 
     /// Single attempt at calling `/responses` with the current token.
+    ///
+    /// Returns a `Vec` of stream events (TextDelta / ToolUseDelta / MessageComplete)
+    /// to be emitted by the caller.
     async fn complete_once(
         &self,
         request: &ApiMessageRequest,
-    ) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError> {
+    ) -> Result<Vec<Result<ApiStreamEvent, ApiError>>, ApiError> {
         let span = info_span!("codex_api_request", model = %request.model);
 
         async {
@@ -256,7 +259,7 @@ impl CodexApiClient {
     async fn handle_response(
         resp: reqwest::Response,
         url: &str,
-    ) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError> {
+    ) -> Result<Vec<Result<ApiStreamEvent, ApiError>>, ApiError> {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -290,14 +293,7 @@ impl StreamingApiClient for CodexApiClient {
 
         for attempt in 0..=MAX_RETRIES {
             match self.complete_once(&request).await {
-                Ok((message, usage, stop_reason)) => {
-                    let events = vec![Ok(ApiStreamEvent::MessageComplete(
-                        ApiMessageCompleteEvent {
-                            message,
-                            usage,
-                            stop_reason,
-                        },
-                    ))];
+                Ok(events) => {
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
                 Err(e) => {
@@ -472,18 +468,25 @@ struct PendingToolCall {
     arguments: String,
 }
 
+/// Parse the OpenAI Responses API SSE stream, emitting incremental events.
+///
+/// Yields:
+/// - `ApiStreamEvent::TextDelta` for each `response.output_text.delta` event.
+/// - `ApiStreamEvent::ToolUseDelta` for each `response.function_call_arguments.delta` event.
+/// - `ApiStreamEvent::MessageComplete` once at the end with accumulated usage / stop_reason.
 async fn parse_sse_stream<S>(
     stream: S,
-) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError>
+) -> Result<Vec<Result<ApiStreamEvent, ApiError>>, ApiError>
 where
     S: Stream<Item = Result<bytes::Bytes, String>> + Unpin,
 {
     let mut result = ResponsesResult::default();
-    let mut stream = stream.eventsource();
+    let mut events: Vec<Result<ApiStreamEvent, ApiError>> = Vec::new();
+    let mut sse = stream.eventsource();
     let idle = Duration::from_secs(120);
 
     loop {
-        match tokio::time::timeout(idle, stream.next()).await {
+        match tokio::time::timeout(idle, sse.next()).await {
             Ok(Some(Ok(event))) => {
                 let data = event.data.trim();
                 if data.is_empty() {
@@ -493,7 +496,8 @@ where
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if handle_event(&mut result, event.event.as_str(), &parsed) {
+                let done = handle_event_incremental(&mut result, &mut events, event.event.as_str(), &parsed);
+                if done {
                     break;
                 }
             }
@@ -510,7 +514,7 @@ where
         }
     }
 
-    // Build the ConversationMessage.
+    // Build the final MessageComplete event.
     let mut blocks: Vec<ContentBlock> = Vec::new();
     if !result.text.is_empty() {
         blocks.push(ContentBlock::Text(TextBlock::new(result.text)));
@@ -532,7 +536,6 @@ where
         ..Default::default()
     };
     let stop_reason = result.stop_reason.or_else(|| {
-        // If we produced tool calls, reflect that; otherwise end_turn.
         if blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse(_))) {
             Some("tool_use".into())
         } else {
@@ -540,22 +543,36 @@ where
         }
     });
 
-    Ok((
-        ConversationMessage {
+    events.push(Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
+        message: ConversationMessage {
             role: Role::Assistant,
             content: blocks,
         },
         usage,
         stop_reason,
-    ))
+    })));
+
+    Ok(events)
 }
 
-/// Returns true when the stream should terminate (response.completed).
-fn handle_event(result: &mut ResponsesResult, event_type: &str, parsed: &Value) -> bool {
+/// Handle one SSE event, pushing any incremental `ApiStreamEvent`s into `events`.
+///
+/// Returns `true` when the stream should terminate (`response.completed`).
+fn handle_event_incremental(
+    result: &mut ResponsesResult,
+    events: &mut Vec<Result<ApiStreamEvent, ApiError>>,
+    event_type: &str,
+    parsed: &Value,
+) -> bool {
     match event_type {
         "response.output_text.delta" => {
             if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
-                result.text.push_str(delta);
+                if !delta.is_empty() {
+                    result.text.push_str(delta);
+                    events.push(Ok(ApiStreamEvent::TextDelta(ApiTextDeltaEvent {
+                        text: delta.to_string(),
+                    })));
+                }
             }
         }
         "response.output_item.added" => {
@@ -590,6 +607,15 @@ fn handle_event(result: &mut ResponsesResult, event_type: &str, parsed: &Value) 
             ) {
                 if let Some(entry) = result.pending.get_mut(item_id) {
                     entry.arguments.push_str(delta);
+                    events.push(Ok(ApiStreamEvent::ToolUseDelta(ApiToolUseDeltaEvent {
+                        tool_call_id: entry.call_id.clone(),
+                        name: if entry.name.is_empty() {
+                            None
+                        } else {
+                            Some(entry.name.clone())
+                        },
+                        arguments_delta: delta.to_string(),
+                    })));
                 }
             }
         }
@@ -790,6 +816,16 @@ mod tests {
         assert!(converted.get("function").is_none());
     }
 
+    /// Helper: extract MessageComplete from the last event in the vec.
+    fn expect_complete(
+        events: &[Result<ApiStreamEvent, ApiError>],
+    ) -> &ApiMessageCompleteEvent {
+        match events.last().unwrap() {
+            Ok(ApiStreamEvent::MessageComplete(e)) => e,
+            other => panic!("expected MessageComplete as last event, got {:?}", other),
+        }
+    }
+
     #[tokio::test]
     async fn test_parse_sse_text_only() {
         let chunks: Vec<Result<bytes::Bytes, String>> = vec![
@@ -804,11 +840,40 @@ mod tests {
             )),
         ];
         let stream = futures::stream::iter(chunks);
-        let (msg, usage, stop) = parse_sse_stream(stream).await.unwrap();
-        assert_eq!(msg.text(), "Hello world");
-        assert_eq!(usage.input_tokens, 3);
-        assert_eq!(usage.output_tokens, 2);
-        assert_eq!(stop.as_deref(), Some("end_turn"));
+        let events = parse_sse_stream(stream).await.unwrap();
+        let complete = expect_complete(&events);
+        assert_eq!(complete.message.text(), "Hello world");
+        assert_eq!(complete.usage.input_tokens, 3);
+        assert_eq!(complete.usage.output_tokens, 2);
+        assert_eq!(complete.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_text_emits_text_deltas_before_complete() {
+        let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+            Ok(bytes::Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\"Hello\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\" world\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            )),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let events = parse_sse_stream(stream).await.unwrap();
+        // Should have 2 TextDelta + 1 MessageComplete
+        assert_eq!(events.len(), 3);
+        match &events[0] {
+            Ok(ApiStreamEvent::TextDelta(e)) => assert_eq!(e.text, "Hello"),
+            other => panic!("expected first TextDelta, got {:?}", other),
+        }
+        match &events[1] {
+            Ok(ApiStreamEvent::TextDelta(e)) => assert_eq!(e.text, " world"),
+            other => panic!("expected second TextDelta, got {:?}", other),
+        }
+        assert!(matches!(&events[2], Ok(ApiStreamEvent::MessageComplete(_))));
     }
 
     #[tokio::test]
@@ -828,13 +893,51 @@ mod tests {
             )),
         ];
         let stream = futures::stream::iter(chunks);
-        let (msg, _usage, stop) = parse_sse_stream(stream).await.unwrap();
-        assert_eq!(msg.tool_uses().len(), 1);
-        let tu = msg.tool_uses()[0];
+        let events = parse_sse_stream(stream).await.unwrap();
+        let complete = expect_complete(&events);
+        assert_eq!(complete.message.tool_uses().len(), 1);
+        let tu = complete.message.tool_uses()[0];
         assert_eq!(tu.name, "search");
         assert_eq!(tu.id, "call_1");
         assert_eq!(tu.input.get("q").and_then(|v| v.as_str()), Some("rust"));
-        assert_eq!(stop.as_deref(), Some("tool_use"));
+        assert_eq!(complete.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_tool_call_emits_tool_use_deltas_before_complete() {
+        let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+            Ok(bytes::Bytes::from_static(
+                b"event: response.output_item.added\ndata: {\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"search\"}}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_1\",\"delta\":\"{\\\"q\\\":\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_1\",\"delta\":\"\\\"rust\\\"}\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+            )),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let events = parse_sse_stream(stream).await.unwrap();
+
+        // 2 ToolUseDelta + 1 MessageComplete
+        assert_eq!(events.len(), 3);
+        match &events[0] {
+            Ok(ApiStreamEvent::ToolUseDelta(e)) => {
+                assert_eq!(e.tool_call_id, "call_1");
+                assert_eq!(e.name.as_deref(), Some("search"));
+            }
+            other => panic!("expected ToolUseDelta, got {:?}", other),
+        }
+        match &events[1] {
+            Ok(ApiStreamEvent::ToolUseDelta(e)) => {
+                assert_eq!(e.tool_call_id, "call_1");
+            }
+            other => panic!("expected ToolUseDelta, got {:?}", other),
+        }
+        assert!(matches!(&events[2], Ok(ApiStreamEvent::MessageComplete(_))));
     }
 
     #[test]

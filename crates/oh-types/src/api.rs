@@ -1,7 +1,6 @@
 //! API client types: requests, events, usage, errors.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::messages::ConversationMessage;
 
@@ -67,6 +66,17 @@ pub struct ApiTextDeltaEvent {
     pub text: String,
 }
 
+/// Incremental tool-call argument chunk produced by the model.
+#[derive(Debug, Clone)]
+pub struct ApiToolUseDeltaEvent {
+    /// Tool-call identifier (e.g. `call_abc123` for OpenAI, `fc_…` for Codex).
+    pub tool_call_id: String,
+    /// Tool name (populated on the first delta for this call).
+    pub name: Option<String>,
+    /// Partial JSON arguments string for this chunk.
+    pub arguments_delta: String,
+}
+
 /// Terminal event containing the full assistant message.
 #[derive(Debug, Clone)]
 pub struct ApiMessageCompleteEvent {
@@ -79,6 +89,7 @@ pub struct ApiMessageCompleteEvent {
 #[derive(Debug, Clone)]
 pub enum ApiStreamEvent {
     TextDelta(ApiTextDeltaEvent),
+    ToolUseDelta(ApiToolUseDeltaEvent),
     MessageComplete(ApiMessageCompleteEvent),
 }
 

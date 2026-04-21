@@ -1,6 +1,6 @@
 //! CLI argument definitions and main entry point.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use oh_api::{AnthropicApiClient, CodexApiClient, OpenAiApiClient, StreamingApiClient};
 use oh_config::{load_settings, CliOverrides};
 use oh_engine::QueryEngine;
@@ -12,10 +12,25 @@ use oh_tools::create_default_tool_registry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Subcommands
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Run in JSON-lines IPC host mode (for React/Ink frontends)
+    Host {
+        /// Use JSON-lines protocol on stdin/stdout
+        #[arg(long = "json-lines")]
+        json_lines: bool,
+    },
+}
+
 /// OpenHarness — an AI-powered coding assistant
 #[derive(Parser, Debug)]
 #[command(name = "openharness", version, about)]
 pub struct Args {
+    /// Subcommand
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Continue the most recent session
     #[arg(short = 'c', long = "continue")]
     pub continue_session: bool,
@@ -87,6 +102,24 @@ pub struct Args {
 
 /// Main CLI entry point.
 pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Dispatch host subcommand before loading the full TUI stack.
+    if let Some(Command::Host { json_lines }) = args.command {
+        if json_lines {
+            return crate::commands::host::run_json_lines(
+                args.model,
+                args.max_turns,
+                args.system_prompt.clone(),
+                args.permission_mode,
+                args.settings,
+                args.dangerously_skip_permissions,
+            )
+            .await;
+        } else {
+            eprintln!("ohrs host: use --json-lines to enable JSON-lines IPC mode");
+            std::process::exit(1);
+        }
+    }
+
     // Load settings
     let config_path = args.settings.as_deref().map(PathBuf::from);
     let settings = load_settings(config_path.as_ref().map(|p| p.as_path()))?;
