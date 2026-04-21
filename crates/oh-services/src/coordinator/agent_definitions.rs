@@ -160,6 +160,42 @@ pub struct AgentDefinition {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: Python-compatible tool list deserialization
+//
+// Python accepts `tools` as either a YAML list of strings  (tools: [a, b])
+// or as a tagged enum object (tools: {type: allow_list, list: [a, b]}).
+// We bridge these via a custom `RawTools` type.
+// ---------------------------------------------------------------------------
+
+/// `tools` in YAML can be:
+/// - absent                             → AllowAll
+/// - a list of strings `[a, b]`         → AllowList { list: [a, b] }  (Python style)
+/// - a tagged object `{type: ..., list}` → ToolPolicy (native Rust style)
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawTools {
+    /// Python-style `tools: [bash, grep]` or `tools: ['*']`
+    List(Vec<String>),
+    /// Native tagged-enum style `tools: {type: allow_list, list: [bash]}`
+    Policy(ToolPolicy),
+}
+
+impl RawTools {
+    fn into_policy(self) -> ToolPolicy {
+        match self {
+            RawTools::Policy(p) => p,
+            RawTools::List(list) => {
+                if list.is_empty() || list == ["*"] {
+                    ToolPolicy::AllowAll
+                } else {
+                    ToolPolicy::AllowList { list }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Raw serde struct (what sits in the YAML file)
 // ---------------------------------------------------------------------------
 
@@ -173,16 +209,25 @@ struct RawAgentDef {
     effort: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
-    /// Absent → AllowAll; present with `type` key → AllowList / DenyList.
+    /// Absent → AllowAll.
+    /// Python style: `tools: [bash, grep]` → AllowList.
+    /// Rust style: `tools: {type: allow_list, list: [...]}`.
     #[serde(default)]
-    tools: Option<ToolPolicy>,
+    tools: Option<RawTools>,
+    /// Python `disallowed_tools` / `disallowedTools` → converted to DenyList.
+    /// Ignored when `tools` is already a DenyList/AllowList.
+    #[serde(default, alias = "disallowedTools")]
+    disallowed_tools: Option<Vec<String>>,
     #[serde(default)]
     hooks: HashMap<String, serde_json::Value>,
-    #[serde(default)]
+    /// `isolation_mode` (Rust) or `isolation` (Python).
+    #[serde(default, alias = "isolation")]
     isolation_mode: IsolationMode,
-    #[serde(default)]
+    /// `memory_scope` (Rust) or `memory` (Python).
+    #[serde(default, alias = "memory")]
     memory_scope: MemoryScope,
-    #[serde(default)]
+    /// `max_turns` (Rust/Python snake_case) or `maxTurns` (Python camelCase).
+    #[serde(default, alias = "maxTurns")]
     max_turns: Option<u32>,
     #[serde(default)]
     timeout_seconds: Option<u32>,
@@ -343,13 +388,23 @@ impl AgentDefinitionLoader {
 
         let subagent_type = raw.subagent_type.unwrap_or_else(|| name.clone());
 
+        // Resolve tool policy: raw `tools` wins; fall back to `disallowed_tools`
+        // if only that field is present (Python compatibility).
+        let tools = match raw.tools {
+            Some(raw_tools) => raw_tools.into_policy(),
+            None => match raw.disallowed_tools {
+                Some(list) if !list.is_empty() => ToolPolicy::DenyList { list },
+                _ => ToolPolicy::AllowAll,
+            },
+        };
+
         Ok(AgentDefinition {
             name,
             description: raw.description,
             model: raw.model,
             effort: raw.effort,
             system_prompt: raw.system_prompt,
-            tools: raw.tools.unwrap_or_default(),
+            tools,
             hooks: raw.hooks,
             isolation_mode: raw.isolation_mode,
             memory_scope: raw.memory_scope,
@@ -689,7 +744,116 @@ model: project-model
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: camelCase aliases work (mcpServers, permissionMode, etc.)
+    // Test 8: Python-style `tools: [list]` and `disallowed_tools` parsing
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_python_style_tools_and_disallowed() {
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // Python-style allow list
+        write_yaml(
+            &agents_dir,
+            "python_allow",
+            r#"
+description: Python allow style
+tools: [bash, grep, read]
+"#,
+        );
+
+        // Python-style disallowed_tools → DenyList
+        write_yaml(
+            &agents_dir,
+            "python_deny",
+            r#"
+description: Python deny style
+disallowed_tools: [bash]
+"#,
+        );
+
+        // `tools: ['*']` → AllowAll
+        write_yaml(
+            &agents_dir,
+            "python_star",
+            r#"
+description: Python star all
+tools: ['*']
+"#,
+        );
+
+        // camelCase alias `disallowedTools`
+        write_yaml(
+            &agents_dir,
+            "camel_deny",
+            r#"
+description: Camel deny
+disallowedTools: [bash, rm]
+"#,
+        );
+
+        let loader = AgentDefinitionLoader::with_roots(vec![agents_dir.clone()]);
+        let registry = run(loader.load_all()).unwrap();
+
+        let allow = registry.get("python_allow").unwrap();
+        assert_eq!(
+            allow.tools,
+            ToolPolicy::AllowList {
+                list: vec!["bash".to_string(), "grep".to_string(), "read".to_string()]
+            }
+        );
+
+        let deny = registry.get("python_deny").unwrap();
+        assert_eq!(
+            deny.tools,
+            ToolPolicy::DenyList {
+                list: vec!["bash".to_string()]
+            }
+        );
+
+        let star = registry.get("python_star").unwrap();
+        assert_eq!(star.tools, ToolPolicy::AllowAll);
+
+        let camel_deny = registry.get("camel_deny").unwrap();
+        assert_eq!(
+            camel_deny.tools,
+            ToolPolicy::DenyList {
+                list: vec!["bash".to_string(), "rm".to_string()]
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: Python aliases for isolation / memory / maxTurns
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_python_aliases_isolation_memory_maxturns() {
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        write_yaml(
+            &agents_dir,
+            "python_aliases",
+            r#"
+description: Python alias test
+isolation: worktree
+memory: isolated
+maxTurns: 42
+"#,
+        );
+
+        let loader = AgentDefinitionLoader::with_roots(vec![agents_dir.clone()]);
+        let registry = run(loader.load_all()).unwrap();
+
+        let def = registry.get("python_aliases").unwrap();
+        assert_eq!(def.isolation_mode, IsolationMode::Worktree);
+        assert_eq!(def.memory_scope, MemoryScope::Isolated);
+        assert_eq!(def.max_turns, Some(42));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: camelCase aliases work (mcpServers, permissionMode, etc.)
     // -----------------------------------------------------------------------
     #[test]
     fn test_camel_case_aliases() {
