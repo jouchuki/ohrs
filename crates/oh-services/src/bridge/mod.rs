@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -27,6 +27,8 @@ pub struct BridgeSessionState {
     pub output_buf: VecDeque<String>,
     pub child_handle: Option<JoinHandle<()>>,
     pub kill_tx: Option<oneshot::Sender<()>>,
+    /// Shared child handle so stop_session can send SIGKILL to the OS process.
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 pub struct BridgeManager {
@@ -84,7 +86,9 @@ impl BridgeManager {
         cmd.args(&argv[1..])
             .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // Don't leave zombie processes if the task is dropped.
+            .kill_on_drop(true);
 
         let mut child = cmd
             .spawn()
@@ -95,6 +99,10 @@ impl BridgeManager {
 
         let stdout = child.stdout.take().map(BufReader::new);
         let stderr = child.stderr.take().map(BufReader::new);
+
+        // Shared child so stop_session can kill the OS process.
+        let child_arc: Arc<Mutex<Option<tokio::process::Child>>> =
+            Arc::new(Mutex::new(Some(child)));
 
         let record = BridgeSessionRecord {
             session_id: session_id.clone(),
@@ -110,9 +118,23 @@ impl BridgeManager {
 
         let sessions = Arc::clone(&self.sessions);
         let sid = session_id.clone();
+        let child_arc2 = Arc::clone(&child_arc);
+
+        // Insert the session entry before spawning the watcher task so that
+        // output lines emitted by a fast-exiting child are not dropped.
+        let state = BridgeSessionState {
+            record: record.clone(),
+            output_buf: VecDeque::new(),
+            child_handle: None, // filled in below
+            kill_tx: Some(kill_tx),
+            child: Arc::clone(&child_arc),
+        };
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.clone(), state);
 
         let handle = tokio::spawn(async move {
-            // Collect lines from stdout and stderr concurrently.
             let stdout_lines = async {
                 if let Some(rdr) = stdout {
                     let mut lines = rdr.lines();
@@ -133,43 +155,39 @@ impl BridgeManager {
             tokio::select! {
                 _ = async { tokio::join!(stdout_lines, stderr_lines) } => {},
                 _ = kill_rx => {
-                    // kill_tx was dropped or sent: child will be reaped below
+                    // Caller already killed the OS process; drain nothing.
                 },
             }
 
-            // Wait for child exit, update status.
-            match child.wait().await {
-                Ok(status) => {
-                    let new_status = if status.success() {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
-                    let mut map = sessions.write().await;
-                    if let Some(state) = map.get_mut(&sid) {
-                        state.record.status = new_status.into();
-                    }
+            // Reap the child and update status.
+            let exit = {
+                let mut guard = child_arc2.lock().await;
+                if let Some(c) = guard.as_mut() {
+                    c.wait().await.ok()
+                } else {
+                    None
                 }
-                Err(_) => {
-                    let mut map = sessions.write().await;
-                    if let Some(state) = map.get_mut(&sid) {
-                        state.record.status = "failed".into();
-                    }
+            };
+
+            let new_status = match exit {
+                Some(s) if s.success() => "completed",
+                Some(_) => "failed",
+                None => "failed",
+            };
+
+            let mut map = sessions.write().await;
+            if let Some(state) = map.get_mut(&sid) {
+                // Only update if not already marked killed.
+                if state.record.status == "running" {
+                    state.record.status = new_status.into();
                 }
             }
         });
 
-        let state = BridgeSessionState {
-            record: record.clone(),
-            output_buf: VecDeque::new(),
-            child_handle: Some(handle),
-            kill_tx: Some(kill_tx),
-        };
-
-        self.sessions
-            .write()
-            .await
-            .insert(session_id, state);
+        // Store the task handle.
+        if let Some(state) = self.sessions.write().await.get_mut(&session_id) {
+            state.child_handle = Some(handle);
+        }
 
         Ok(record)
     }
@@ -196,20 +214,38 @@ impl BridgeManager {
     }
 
     pub async fn stop_session(&self, id: &str) -> Result<(), BridgeError> {
-        let mut map = self.sessions.write().await;
-        let state = map
-            .get_mut(id)
-            .ok_or_else(|| BridgeError::NotFound(id.into()))?;
+        // Extract the child and kill channel under the write lock, then kill
+        // the OS process outside the lock to avoid holding it during I/O.
+        let (child_arc, kill_tx) = {
+            let mut map = self.sessions.write().await;
+            let state = map
+                .get_mut(id)
+                .ok_or_else(|| BridgeError::NotFound(id.into()))?;
 
-        // Signal the watcher task to stop.
-        if let Some(tx) = state.kill_tx.take() {
+            state.record.status = "killed".into();
+            let kill_tx = state.kill_tx.take();
+            let child_arc = Arc::clone(&state.child);
+            // Abort watcher task so it doesn't overwrite our "killed" status.
+            if let Some(handle) = state.child_handle.take() {
+                handle.abort();
+            }
+            (child_arc, kill_tx)
+        };
+
+        // Notify the watcher task (best-effort).
+        if let Some(tx) = kill_tx {
             let _ = tx.send(());
         }
-        // Abort the watcher task.
-        if let Some(handle) = state.child_handle.take() {
-            handle.abort();
+
+        // Kill the OS process.
+        let mut guard = child_arc.lock().await;
+        if let Some(child) = guard.as_mut() {
+            let _ = child.start_kill();
+            // Reap to avoid zombies; ignore errors (process may have already exited).
+            let _ = child.wait().await;
         }
-        state.record.status = "killed".into();
+        *guard = None;
+
         Ok(())
     }
 
@@ -218,7 +254,7 @@ impl BridgeManager {
     }
 }
 
-/// Push a line into the session's ring buffer.
+/// Push a line into the session's ring buffer (bounded at OUTPUT_BUF_CAP lines).
 async fn push_line(
     sessions: &Arc<RwLock<HashMap<String, BridgeSessionState>>>,
     sid: &str,
@@ -247,15 +283,24 @@ pub fn generate_work_secret() -> WorkSecret {
     }
 }
 
-/// Constant-time comparison: true iff provided matches expected token.
+/// Constant-time comparison: true iff `provided` matches `expected.session_ingress_token`.
+///
+/// Pads both sides to the same length before XOR-folding so that length
+/// differences do not reveal information through timing.
 pub fn validate_work_secret(provided: &str, expected: &WorkSecret) -> bool {
     let a = provided.as_bytes();
     let b = expected.session_ingress_token.as_bytes();
-    if a.len() != b.len() {
-        return false;
+    let max_len = a.len().max(b.len());
+
+    // Accumulate mismatches including any length difference.
+    let mut diff: u8 = 0;
+    for i in 0..max_len {
+        let x = if i < a.len() { a[i] } else { 0 };
+        let y = if i < b.len() { b[i] } else { 0 };
+        diff |= x ^ y;
     }
-    // XOR every byte; accumulate differences.
-    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    // Also flag if lengths differ (handles empty-vs-empty edge case correctly).
+    diff |= (a.len() != b.len()) as u8;
     diff == 0
 }
 
@@ -338,6 +383,9 @@ mod tests {
             .await
             .expect("spawn sleep");
 
+        // Verify the process is running (pid should be non-zero).
+        assert!(record.pid > 0);
+
         mgr.stop_session(&record.session_id)
             .await
             .expect("stop_session failed");
@@ -368,7 +416,6 @@ mod tests {
     fn test_generate_work_secret_length() {
         let ws = generate_work_secret();
         assert_eq!(ws.session_ingress_token.len(), 64);
-        // All chars must be hex.
         assert!(ws.session_ingress_token.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -394,10 +441,15 @@ mod tests {
     #[test]
     fn test_validate_work_secret_same_length_mismatch() {
         let ws = generate_work_secret();
-        // Flip last char to get a same-length but different token.
         let mut bad = ws.session_ingress_token.clone();
         let last = bad.pop().unwrap();
         bad.push(if last == 'a' { 'b' } else { 'a' });
         assert!(!validate_work_secret(&bad, &ws));
+    }
+
+    #[test]
+    fn test_validate_work_secret_empty_vs_nonempty() {
+        let ws = generate_work_secret();
+        assert!(!validate_work_secret("", &ws));
     }
 }
