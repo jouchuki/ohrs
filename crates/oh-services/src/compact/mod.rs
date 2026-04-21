@@ -1,7 +1,8 @@
 //! Context-window auto-compaction for long sessions.
 //!
 //! Two compaction modes are supported:
-//! - **Proactive**: token estimate exceeds `threshold_tokens` before sending the next turn.
+//! - **Proactive**: token estimate of the full request (messages + system prompt + tool schemas)
+//!   exceeds `threshold_tokens` before sending the next turn.
 //! - **Reactive**: the API returns a prompt-too-long error; catch, compact, retry.
 //!
 //! # Token estimation
@@ -10,6 +11,12 @@
 //! overhead of 10 tokens per `ToolUse` block to account for JSON schema serialisation.  This
 //! is intentionally approximate — the goal is to trigger compaction *before* the provider
 //! rejects the request, so false negatives are more costly than false positives.
+//!
+//! # Split-point safety
+//! The split point is snapped backward to the start of the nearest **complete tool-call pair**
+//! (i.e. an assistant `ToolUse` message followed immediately by a user `ToolResult` message).
+//! This prevents the preserved tail from containing an orphaned `ToolResult` whose corresponding
+//! `ToolUse` was summarized away — a structural violation that most providers reject.
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -54,9 +61,11 @@ pub trait CompactSummarizer: Send + Sync {
 pub struct CompactRequest<'a> {
     /// Full conversation history to consider for compaction.
     pub messages: &'a [ConversationMessage],
-    /// Always preserve the last `keep_last_n` messages verbatim in the output.
+    /// Always preserve (at least) the last `keep_last_n` messages verbatim in the output.
+    /// The actual number preserved may be larger if snapping to a tool-call boundary requires it.
     pub keep_last_n: usize,
-    /// The active system prompt (passed to the summarizer for context).
+    /// The active system prompt (passed to the summarizer for context, and included in the
+    /// full-request token estimate used by `should_compact_full`).
     pub system_prompt: &'a str,
 }
 
@@ -66,8 +75,8 @@ pub struct CompactResult {
     /// Narrative summary of the portion that was compressed.
     pub summary: String,
     /// Replacement message list: synthetic summary message + tail verbatim messages.
-    /// Length == `keep_last_n + 1` (the `+1` is the synthetic user message containing
-    /// the summary).
+    /// Length >= `keep_last_n + 1` (the `+1` is the synthetic user message containing
+    /// the summary; more messages may be kept if the split was snapped to a boundary).
     pub kept_messages: Vec<ConversationMessage>,
     /// Estimated token count of the *original* message list (before compaction).
     pub estimated_tokens_before: u32,
@@ -139,13 +148,47 @@ impl Compactor {
         char_tokens + tool_tokens
     }
 
+    /// Estimate tokens for the **full API request**: messages + system prompt + tool schemas.
+    ///
+    /// This is the value that should be compared against `threshold_tokens` for proactive
+    /// compaction, because providers count the entire request against the context window —
+    /// not just the message history.
+    ///
+    /// `tool_schemas_chars` is the approximate character count of the serialised tool
+    /// definitions sent in the request (pass `0` if no tools are in use).
+    pub fn estimate_tokens_full(
+        messages: &[ConversationMessage],
+        system_prompt: &str,
+        tool_schemas_chars: usize,
+    ) -> u32 {
+        let msg_tokens = Self::estimate_tokens(messages);
+        let system_tokens = (system_prompt.len() / 4) as u32;
+        let tool_tokens = (tool_schemas_chars / 4) as u32;
+        msg_tokens + system_tokens + tool_tokens
+    }
+
     // -----------------------------------------------------------------------
     // Threshold check
     // -----------------------------------------------------------------------
 
-    /// Return `true` when proactive compaction should be triggered.
+    /// Return `true` when proactive compaction should be triggered based on message tokens only.
+    ///
+    /// Prefer [`should_compact_full`] when you have access to the system prompt and tool schemas,
+    /// as those can contribute significantly to total request size.
     pub fn should_compact(&self, messages: &[ConversationMessage]) -> bool {
         Self::estimate_tokens(messages) >= self.threshold_tokens
+    }
+
+    /// Return `true` when proactive compaction should be triggered, accounting for the full
+    /// API request (messages + system prompt + serialised tool schemas).
+    pub fn should_compact_full(
+        &self,
+        messages: &[ConversationMessage],
+        system_prompt: &str,
+        tool_schemas_chars: usize,
+    ) -> bool {
+        Self::estimate_tokens_full(messages, system_prompt, tool_schemas_chars)
+            >= self.threshold_tokens
     }
 
     // -----------------------------------------------------------------------
@@ -157,6 +200,10 @@ impl Compactor {
     /// Splits `req.messages` into:
     /// - `to_summarize`: everything *except* the last `keep_last_n` messages.
     /// - `to_keep`: the last `keep_last_n` messages (preserved verbatim).
+    ///
+    /// The split point is snapped backward to the start of the nearest complete
+    /// tool-call pair so the preserved tail never starts with an orphaned
+    /// `ToolResult` message.
     ///
     /// Calls `summarizer.summarize()` on a human-readable transcript of
     /// `to_summarize`, then returns a `CompactResult` whose `kept_messages` is:
@@ -180,7 +227,19 @@ impl Compactor {
             return Err(CompactError::TooFewMessages);
         }
 
-        let split_at = total - keep;
+        let naive_split = total - keep;
+
+        // Snap the split point backward to a safe tool-call boundary.
+        // A boundary is safe when the message at `split_at` is NOT a ToolResult
+        // whose ToolUse is in the summarized portion.  We scan backward from the
+        // naive split until we reach a non-ToolResult message or the beginning.
+        let split_at = Self::safe_split_point(req.messages, naive_split);
+
+        // After snapping, ensure we still have something to summarize.
+        if split_at == 0 {
+            return Err(CompactError::TooFewMessages);
+        }
+
         let to_summarize = &req.messages[..split_at];
         let to_keep = &req.messages[split_at..];
 
@@ -201,7 +260,7 @@ impl Compactor {
             )))],
         };
 
-        let mut kept_messages = Vec::with_capacity(keep + 1);
+        let mut kept_messages = Vec::with_capacity(to_keep.len() + 1);
         kept_messages.push(summary_message);
         kept_messages.extend_from_slice(to_keep);
 
@@ -226,6 +285,10 @@ impl Compactor {
     /// - **Anthropic**: `"context_window_exceeded"`, `"context window"`, `"prompt too long"`
     /// - **OpenAI**: `"context_length_exceeded"`, `"maximum context length"`, `"context length"`
     /// - **Codex / generic**: `"too many tokens"`, `"too large for the model"`, `"maximum context"`
+    ///
+    /// All provider errors are currently wrapped in `ApiError::Request(body)` by the API
+    /// layer; the other variants (`Authentication`, `RateLimit`, `Network`) are not context
+    /// errors and will correctly return `false`.
     pub fn is_prompt_too_long_error(err: &ApiError) -> bool {
         let text = err.to_string().to_lowercase();
         // Patterns drawn from Python reference implementation plus Anthropic / OpenAI
@@ -247,6 +310,26 @@ impl Compactor {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Compute a safe split index.
+    ///
+    /// Starting from `naive_split`, walk backward until the message at that index is
+    /// not a `ToolResult`-only message.  This ensures the preserved tail always starts
+    /// with either an assistant message or a genuine user-text message, never with an
+    /// orphaned tool result whose `ToolUse` was compressed away.
+    fn safe_split_point(messages: &[ConversationMessage], naive_split: usize) -> usize {
+        let mut split = naive_split;
+        while split > 0 && Self::is_tool_result_message(&messages[split]) {
+            split -= 1;
+        }
+        split
+    }
+
+    /// Return true if the message consists entirely of `ToolResult` blocks.
+    fn is_tool_result_message(msg: &ConversationMessage) -> bool {
+        !msg.content.is_empty()
+            && msg.content.iter().all(|b| matches!(b, ContentBlock::ToolResult(_)))
+    }
 
     /// Format a message slice as a human-readable transcript for the summarizer.
     fn format_transcript(messages: &[ConversationMessage], target_tokens: u32) -> String {
@@ -341,6 +424,17 @@ mod tests {
         }
     }
 
+    fn tool_result_msg(tool_use_id: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult(ToolResultBlock::new(
+                tool_use_id,
+                "output",
+                false,
+            ))],
+        }
+    }
+
     fn make_history(n: usize) -> Vec<ConversationMessage> {
         (0..n)
             .map(|i| {
@@ -402,6 +496,15 @@ mod tests {
         assert_eq!(t, 100);
     }
 
+    #[test]
+    fn estimate_tokens_full_adds_system_and_tools() {
+        let msgs = vec![text_msg(Role::User, &"x".repeat(400))];
+        let msg_only = Compactor::estimate_tokens(&msgs);
+        let full = Compactor::estimate_tokens_full(&msgs, &"s".repeat(400), 400);
+        // system: 100, tools: 100, so full should be msg_only + 200
+        assert_eq!(full, msg_only + 200);
+    }
+
     // -----------------------------------------------------------------------
     // should_compact
     // -----------------------------------------------------------------------
@@ -424,6 +527,15 @@ mod tests {
     fn should_compact_false_on_empty() {
         let compactor = Compactor::new(1_000, 200);
         assert!(!compactor.should_compact(&[]));
+    }
+
+    #[test]
+    fn should_compact_full_triggers_on_system_prompt() {
+        let compactor = Compactor::new(200, 50);
+        // messages alone: ~100 tokens; with large system prompt: >>200
+        let msgs = make_history(1);
+        assert!(!compactor.should_compact(&msgs));
+        assert!(compactor.should_compact_full(&msgs, &"s".repeat(4000), 0));
     }
 
     // -----------------------------------------------------------------------
@@ -528,6 +640,44 @@ mod tests {
 
         let err = compactor.compact(req, &summarizer).await.unwrap_err();
         assert!(matches!(err, CompactError::TooFewMessages));
+    }
+
+    #[tokio::test]
+    async fn compact_snaps_split_past_orphaned_tool_result() {
+        // History: [user, assistant+tool_use, user+tool_result, user, assistant]
+        // keep_last_n=3: naive split=2 lands on the user+tool_result message.
+        // The snap should move it to 1 (before the tool_result), preserving the
+        // pair [assistant+tool_use, user+tool_result] together in the kept tail.
+        let mut msgs = Vec::new();
+        msgs.push(text_msg(Role::User, "initial question"));
+        // assistant with a tool_use
+        msgs.push(ConversationMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse(ToolUseBlock::new(
+                "bash",
+                HashMap::new(),
+            ))],
+        });
+        // user tool_result
+        msgs.push(tool_result_msg("some-id"));
+        msgs.push(text_msg(Role::User, "follow-up"));
+        msgs.push(text_msg(Role::Assistant, "answer"));
+
+        let summarizer = MockSummarizer::new("summary");
+        let compactor = Compactor::new(100, 50);
+        let req = CompactRequest {
+            messages: &msgs,
+            keep_last_n: 3, // naive_split = 5-3 = 2 → lands on tool_result_msg
+            system_prompt: "sys",
+        };
+        let result = compactor.compact(req, &summarizer).await.unwrap();
+        // The split snapped to index 1, so kept = msgs[1..] (4 messages) + summary = 5
+        // but msgs[1] is the tool_use, not a ToolResult, so split stays at 2 only if
+        // msgs[2] is not a ToolResult — but it IS, so split backs up to 1.
+        // kept_messages[0] = summary, then msgs[1..5] = 4 messages
+        assert_eq!(result.kept_messages.len(), 5);
+        // The second message in kept should be the assistant+tool_use
+        assert_eq!(result.kept_messages[1].role, Role::Assistant);
     }
 
     // -----------------------------------------------------------------------
