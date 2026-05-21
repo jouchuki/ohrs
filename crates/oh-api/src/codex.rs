@@ -244,13 +244,22 @@ impl CodexApiClient {
         access_token: &str,
         body: &Value,
     ) -> Result<reqwest::Response, ApiError> {
+        // No request-level timeout on the streaming POST: reqwest's
+        // `.timeout` covers the entire request lifecycle including body
+        // streaming, so capping it at 180s kills any SSE response whose
+        // model generation exceeds that — symptom: "error decoding
+        // response body" mid-stream after exactly 180s. The OpenAI
+        // provider in this crate never set one. The streaming side is
+        // already bounded by the per-event idle timeout in
+        // `parse_sse_stream` (120s without progress) and the
+        // platform-level job timeout, so leaving this off is safe and
+        // matches the long-form gpt-5.4 generation latency.
         self.http
             .post(url)
             .bearer_auth(access_token)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .json(body)
-            .timeout(Duration::from_secs(180))
             .send()
             .await
             .map_err(|e| ApiError::Network(e.to_string()))
