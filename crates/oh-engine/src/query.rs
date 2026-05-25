@@ -78,6 +78,23 @@ pub async fn run_query(
 ) -> Result<Vec<(StreamEvent, Option<UsageSnapshot>)>, EngineError> {
     let mut events = Vec::new();
 
+    // Record the user message that opened this run (the latest user message in
+    // the conversation). This covers both the print-mode prompt and a
+    // subagent's seeded prompt, and feeds the trajectory recorder.
+    if let Some(user_text) = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .map(|m| m.text())
+    {
+        context
+            .fire_hook(
+                HookEvent::PostUserMessage,
+                serde_json::json!({ "text": user_text }),
+            )
+            .await;
+    }
+
     for turn in 0..context.max_turns {
         let span = info_span!("query_turn", turn.number = turn);
 
@@ -129,14 +146,30 @@ pub async fn run_query(
                 }
             }
 
+            let final_message = final_message
+                .ok_or(EngineError::NoResponse)?;
+
+            // Enrich PostApiResponse with the assistant message's text and any
+            // tool_use blocks so the trajectory recorder captures real content.
+            let assistant_tool_uses: Vec<serde_json::Value> = final_message
+                .tool_uses()
+                .iter()
+                .map(|tu| {
+                    serde_json::json!({
+                        "id": tu.id,
+                        "name": tu.name,
+                        "input": tu.input,
+                    })
+                })
+                .collect();
             context.fire_hook(HookEvent::PostApiResponse, serde_json::json!({
                 "model": context.model,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "text": final_message.text(),
+                "tool_uses": assistant_tool_uses,
+                "content": final_message.content.iter().map(oh_types::messages::serialize_content_block).collect::<Vec<_>>(),
             })).await;
-
-            let final_message = final_message
-                .ok_or(EngineError::NoResponse)?;
 
             context.fire_hook(HookEvent::PrePushMessage, serde_json::json!({"role": "assistant", "turn": turn})).await;
             messages.push(final_message.clone());

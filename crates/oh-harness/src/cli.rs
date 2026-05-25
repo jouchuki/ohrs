@@ -12,6 +12,29 @@ use oh_tools::create_default_tool_registry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Fans a lifecycle event out to two [`HookExecutorTrait`]s: the real hook
+/// executor (blocks/webhooks) and the main agent's trajectory recorder.
+///
+/// Mirrors `subagent_runner::FanoutHookExecutor`. A block from the inner
+/// executor still aborts the action; the recorder never blocks.
+struct FanoutHookExecutor {
+    inner: Arc<dyn HookExecutorTrait>,
+    recorder: Arc<dyn HookExecutorTrait>,
+}
+
+#[async_trait::async_trait]
+impl HookExecutorTrait for FanoutHookExecutor {
+    async fn execute(
+        &self,
+        event: HookEvent,
+        payload: serde_json::Value,
+    ) -> oh_hooks::AggregatedHookResult {
+        // Record first (never blocks), then run the real hooks (may block).
+        let _ = self.recorder.execute(event, payload.clone()).await;
+        self.inner.execute(event, payload).await
+    }
+}
+
 /// ohrs — an AI-powered coding assistant
 #[derive(Parser, Debug)]
 #[command(name = "openharness", version, about)]
@@ -210,6 +233,58 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         },
     ));
 
+    // ── Trajectory recording for the MAIN agent ────────────────────────────
+    // Open the session store, create a MAIN session row, and fan a
+    // TrajectoryRecorder for it into the hook executor the engine uses. The
+    // runner keeps the BASE executor as its parent (so child events are not
+    // double-recorded into the main session), and stamps every child session's
+    // `parent_session_id` with the main session id.
+    let session_store: Option<Arc<oh_services::sessions::SessionStore>> =
+        match oh_services::sessions::SessionStore::with_default_backend().await {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                tracing::warn!("subagent: session store unavailable, trajectories disabled: {e}");
+                None
+            }
+        };
+
+    // Main session id: the resumed/-r id if present, else a fresh uuid.
+    let main_session_id = args
+        .resume
+        .clone()
+        .unwrap_or_else(|| format!("session-{}", uuid::Uuid::new_v4()));
+
+    // The hook executor handed to the engine. When recording is on, this is the
+    // base executor fanned together with the main trajectory recorder.
+    let engine_hook_executor: Arc<dyn HookExecutorTrait> = if let Some(store) = &session_store {
+        let rec = oh_services::sessions::SessionRecord {
+            id: main_session_id.clone(),
+            name: args.name.clone(),
+            project_root: cwd.clone(),
+            model: settings.model.clone(),
+            created_at: std::time::SystemTime::now(),
+            updated_at: std::time::SystemTime::now(),
+            message_count: 0,
+            status: oh_services::sessions::SessionStatus::Active,
+            parent_session_id: None,
+        };
+        if let Err(e) = store.create_session(&rec).await {
+            // A resumed session already exists; that is fine.
+            tracing::debug!("main session create skipped: {e}");
+        }
+        let recorder: Arc<dyn HookExecutorTrait> =
+            Arc::new(oh_services::subagent::TrajectoryRecorder::new(
+                Arc::clone(store),
+                main_session_id.clone(),
+            ));
+        Arc::new(FanoutHookExecutor {
+            inner: hook_executor.clone(),
+            recorder,
+        })
+    } else {
+        hook_executor.clone()
+    };
+
     // Build system prompt — base template + env + CLAUDE.md walk; honours --system-prompt / --append-system-prompt / --bare.
     let system_prompt: String = oh_services::prompts::PromptBuilder::new(&cwd)
         .with_override(args.system_prompt.as_deref())
@@ -272,7 +347,8 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         system_prompt,
         settings.max_tokens,
     );
-    engine.set_hook_executor(hook_executor.clone());
+    engine.set_hook_executor(engine_hook_executor.clone());
+    engine.set_session_id(main_session_id.clone());
 
     // Store skill content in engine metadata for execute() lookup
     if !skill_registry_map.is_empty() {
@@ -287,29 +363,24 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     engine.set_max_turns(max_turns);
 
     // ── Subagent orchestration wiring ──────────────────────────────────────
-    // Build the in-process control plane: a session store (for parent-linked
-    // child trajectories), a background-task manager, an engine-bound runner,
-    // and the SubagentManager that ties them together. Inject the two trait
-    // objects (SubagentSpawner / BackgroundTasks) into the engine so the
-    // `Agent` and `Task*` tools can reach them from inside the query loop.
-    let session_store: Option<Arc<oh_services::sessions::SessionStore>> =
-        match oh_services::sessions::SessionStore::with_default_backend().await {
-            Ok(store) => Some(Arc::new(store)),
-            Err(e) => {
-                tracing::warn!("subagent: session store unavailable, trajectories disabled: {e}");
-                None
-            }
-        };
-
+    // Build the in-process control plane: a background-task manager, an
+    // engine-bound runner, and the SubagentManager that ties them together.
+    // Inject the two trait objects (SubagentSpawner / BackgroundTasks) into the
+    // engine so the `Agent` and `Task*` tools can reach them from inside the
+    // query loop. The session store + main session id were set up above.
     let task_manager = Arc::new(oh_services::tasks::BackgroundTaskManager::new());
 
     let runner = Arc::new(crate::subagent_runner::EngineSubagentRunner::new(
         runner_api_client,
         runner_permission_checker,
+        // The runner's parent executor is the BASE one (no main recorder), so
+        // child events are recorded only into the child session, not the main.
         Some(hook_executor.clone()),
         session_store.clone(),
         oh_types::subagent::AgentId::new("main"),
-        None,
+        // Stamp every spawned child session's parent_session_id with the main
+        // session id, linking the full transcript tree.
+        Some(main_session_id.clone()),
         runner_cwd,
         settings.model.clone(),
         runner_system_prompt,

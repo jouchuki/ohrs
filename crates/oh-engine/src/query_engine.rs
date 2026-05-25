@@ -32,6 +32,10 @@ pub struct QueryEngine {
     tool_metadata: std::collections::HashMap<String, serde_json::Value>,
     subagents: Option<Arc<dyn oh_types::subagent::SubagentSpawner>>,
     tasks: Option<Arc<dyn oh_types::subagent::BackgroundTasks>>,
+    /// Persistent session id for the main agent run. When set, it rides the
+    /// `QueryContext` so lifecycle hooks (and the trajectory recorder fanned
+    /// into the hook executor) record under the main session.
+    session_id: Option<String>,
 }
 
 impl QueryEngine {
@@ -62,7 +66,13 @@ impl QueryEngine {
             tool_metadata: std::collections::HashMap::new(),
             subagents: None,
             tasks: None,
+            session_id: None,
         }
+    }
+
+    /// Set the persistent session id this main run records into.
+    pub fn set_session_id(&mut self, session_id: impl Into<String>) {
+        self.session_id = Some(session_id.into());
     }
 
     /// Inject the subagent-spawning handle so the `Agent` tool can reach the
@@ -197,7 +207,7 @@ impl QueryEngine {
             tool_metadata: self.tool_metadata.clone(),
             agent_id: oh_types::subagent::AgentId::new("main"),
             parent_id: None,
-            session_id: None,
+            session_id: self.session_id.clone(),
             subagents: self.subagents.clone(),
             tasks: self.tasks.clone(),
         };
