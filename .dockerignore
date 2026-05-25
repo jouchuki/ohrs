@@ -1,0 +1,17 @@
+# Build artifacts (rebuilt inside the image)
+/target
+**/target
+
+# VCS — kept out of build context; version is passed via build args
+.git
+.gitignore
+
+# CI / editor / OS cruft
+.github
+.claude
+*.swp
+*.swo
+.DS_Store
+
+# Docs and local-only files not needed for the build
+*.md
