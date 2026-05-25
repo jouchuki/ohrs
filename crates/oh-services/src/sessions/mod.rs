@@ -105,6 +105,10 @@ pub struct SessionRecord {
     pub updated_at: SystemTime,
     pub message_count: u32,
     pub status: SessionStatus,
+    /// Id of the parent session for subagent runs; `None` for top-level
+    /// sessions. Links a subagent trajectory back to its spawner.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,15 +173,16 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS sessions(
-    id            TEXT PRIMARY KEY,
-    name          TEXT,
-    project_root  TEXT NOT NULL,
-    model         TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    updated_at    INTEGER NOT NULL,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    status        TEXT NOT NULL DEFAULT 'active'
-                  CHECK(status IN ('active','archived','deleted'))
+    id                TEXT PRIMARY KEY,
+    name              TEXT,
+    project_root      TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    message_count     INTEGER NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'active'
+                      CHECK(status IN ('active','archived','deleted')),
+    parent_session_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages(
@@ -211,6 +216,16 @@ impl SqliteBackend {
             }
             let conn = Connection::open(&path_owned)?;
             conn.execute_batch(SCHEMA)?;
+            // Additive migration for DBs created before `parent_session_id`
+            // existed. `ALTER TABLE ADD COLUMN` errors if the column is already
+            // present, so ignore that specific failure.
+            if let Err(e) =
+                conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", [])
+            {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(e.into());
+                }
+            }
             Ok(conn)
         })
         .await??;
@@ -244,6 +259,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         updated_at: secs_to_system_time(updated_at),
         message_count: message_count_raw.max(0) as u32,
         status: SessionStatus::from_str(&status_str)?,
+        parent_session_id: row.get(8)?,
     })
 }
 
@@ -280,13 +296,14 @@ impl SessionBackend for SqliteBackend {
         let updated_at = system_time_to_secs(rec.updated_at);
         let message_count = rec.message_count as i64;
         let status = rec.status.as_str().to_string();
+        let parent_session_id = rec.parent_session_id.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), SessionError> {
             let conn = conn.lock().map_err(|e| SessionError::Internal(e.to_string()))?;
             conn.execute(
-                "INSERT INTO sessions(id, name, project_root, model, created_at, updated_at, message_count, status)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![id, name, project_root, model, created_at, updated_at, message_count, status],
+                "INSERT INTO sessions(id, name, project_root, model, created_at, updated_at, message_count, status, parent_session_id)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![id, name, project_root, model, created_at, updated_at, message_count, status, parent_session_id],
             )?;
             Ok(())
         })
@@ -300,7 +317,7 @@ impl SessionBackend for SqliteBackend {
         tokio::task::spawn_blocking(move || -> Result<Option<SessionRecord>, SessionError> {
             let conn = conn.lock().map_err(|e| SessionError::Internal(e.to_string()))?;
             let mut stmt = conn.prepare(
-                "SELECT id, name, project_root, model, created_at, updated_at, message_count, status
+                "SELECT id, name, project_root, model, created_at, updated_at, message_count, status, parent_session_id
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -345,7 +362,7 @@ impl SessionBackend for SqliteBackend {
                 .unwrap_or_default();
 
             let sql = format!(
-                "SELECT id, name, project_root, model, created_at, updated_at, message_count, status
+                "SELECT id, name, project_root, model, created_at, updated_at, message_count, status, parent_session_id
                  FROM sessions {where_clause} ORDER BY updated_at DESC {limit_clause}"
             );
 
@@ -386,7 +403,9 @@ impl SessionBackend for SqliteBackend {
         let conn = self.conn();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<(), SessionError> {
-            let conn = conn.lock().map_err(|e| SessionError::Internal(e.to_string()))?;
+            let conn = conn
+                .lock()
+                .map_err(|e| SessionError::Internal(e.to_string()))?;
 
             if let Some(name_opt) = patch.name {
                 conn.execute(
@@ -416,7 +435,9 @@ impl SessionBackend for SqliteBackend {
         let conn = self.conn();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<(), SessionError> {
-            let conn = conn.lock().map_err(|e| SessionError::Internal(e.to_string()))?;
+            let conn = conn
+                .lock()
+                .map_err(|e| SessionError::Internal(e.to_string()))?;
             // Enable foreign keys for this connection to ensure CASCADE works
             conn.execute_batch("PRAGMA foreign_keys=ON;")?;
             conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -472,7 +493,9 @@ impl SessionBackend for SqliteBackend {
         let conn = self.conn();
         let session_id = session_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<SessionMessage>, SessionError> {
-            let conn = conn.lock().map_err(|e| SessionError::Internal(e.to_string()))?;
+            let conn = conn
+                .lock()
+                .map_err(|e| SessionError::Internal(e.to_string()))?;
 
             let (sql, since) = if let Some(seq) = since_seq {
                 (
@@ -545,11 +568,7 @@ impl SessionStore {
         self.backend.list_sessions(filter).await
     }
 
-    pub async fn update_session(
-        &self,
-        id: &str,
-        patch: SessionPatch,
-    ) -> Result<(), SessionError> {
+    pub async fn update_session(&self, id: &str, patch: SessionPatch) -> Result<(), SessionError> {
         self.backend.update_session(id, patch).await
     }
 
@@ -587,6 +606,7 @@ mod tests {
             updated_at: SystemTime::now(),
             message_count: 0,
             status: SessionStatus::Active,
+            parent_session_id: None,
         }
     }
 
@@ -866,6 +886,46 @@ mod tests {
 
         let got = store.get_session("store-sess").await.unwrap();
         assert!(got.is_some());
+    }
+
+    // ── parent_session_id round-trips (parent + child) ───────────────────────
+
+    #[tokio::test]
+    async fn test_parent_child_session_link_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = make_backend(&dir).await;
+
+        // Parent session has no parent.
+        let parent = make_record("parent-sess", dir.path());
+        backend.create_session(&parent).await.unwrap();
+
+        // Child session links to the parent.
+        let mut child = make_record("child-sess", dir.path());
+        child.parent_session_id = Some("parent-sess".to_string());
+        backend.create_session(&child).await.unwrap();
+
+        let got_parent = backend.get_session("parent-sess").await.unwrap().unwrap();
+        assert_eq!(got_parent.parent_session_id, None);
+
+        let got_child = backend.get_session("child-sess").await.unwrap().unwrap();
+        assert_eq!(got_child.parent_session_id, Some("parent-sess".to_string()));
+
+        // The link also survives list_sessions().
+        let listed = backend
+            .list_sessions(SessionFilter {
+                project_root: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let child_listed = listed
+            .iter()
+            .find(|s| s.id == "child-sess")
+            .expect("child should be listed");
+        assert_eq!(
+            child_listed.parent_session_id,
+            Some("parent-sess".to_string())
+        );
     }
 
     // ── list_sessions with limit ─────────────────────────────────────────────

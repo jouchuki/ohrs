@@ -136,7 +136,6 @@ pub struct AgentDefinition {
     pub source: PathBuf,
 
     // --- parity with Python reference ---
-
     /// Permission mode override (e.g. `"default"`, `"acceptEdits"`, `"bypassPermissions"`).
     pub permission_mode: Option<String>,
     /// UI accent color (e.g. `"red"`, `"blue"`, `"green"`).
@@ -157,6 +156,103 @@ pub struct AgentDefinition {
     pub omit_claude_md: bool,
     /// Routing key used by the harness (defaults to `name`).
     pub subagent_type: String,
+}
+
+impl AgentDefinition {
+    /// Construct a code-defined definition with sensible defaults. Used to
+    /// build the built-in agents that the YAML loader layers on top of.
+    pub fn builtin(name: &str, description: &str, tools: ToolPolicy) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            model: None,
+            effort: None,
+            system_prompt: None,
+            tools,
+            hooks: HashMap::new(),
+            isolation_mode: IsolationMode::None,
+            memory_scope: MemoryScope::Inherit,
+            max_turns: None,
+            timeout_seconds: None,
+            source: PathBuf::from("<builtin>"),
+            permission_mode: None,
+            color: None,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            required_mcp_servers: Vec::new(),
+            background: false,
+            initial_prompt: None,
+            critical_system_reminder: None,
+            omit_claude_md: false,
+            subagent_type: name.to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in agent definitions
+// ---------------------------------------------------------------------------
+
+/// The read-only tool denylist shared by the `Explore` and `Plan` agents.
+fn read_only_denylist() -> ToolPolicy {
+    ToolPolicy::DenyList {
+        list: vec![
+            "Edit".to_string(),
+            "Write".to_string(),
+            "NotebookEdit".to_string(),
+        ],
+    }
+}
+
+/// Return the built-in agent definitions, keyed by name.
+///
+/// These are layered *under* the YAML loader: a YAML file with the same name
+/// (or `subagent_type`) overrides the built-in. See [`AgentDefinitionLoader::
+/// load_with_builtins`].
+pub fn builtin_definitions() -> HashMap<String, AgentDefinition> {
+    let mut defs = HashMap::new();
+    for def in [
+        AgentDefinition::builtin(
+            "general-purpose",
+            "General-purpose agent with full tool access.",
+            ToolPolicy::AllowAll,
+        ),
+        AgentDefinition::builtin(
+            "Explore",
+            "Read-only exploration agent (no file mutations).",
+            read_only_denylist(),
+        ),
+        AgentDefinition::builtin(
+            "Plan",
+            "Read-only planning agent (no file mutations).",
+            read_only_denylist(),
+        ),
+        AgentDefinition::builtin(
+            "worker",
+            "Worker agent with full tool access.",
+            ToolPolicy::AllowAll,
+        ),
+    ] {
+        defs.insert(def.name.clone(), def);
+    }
+    defs
+}
+
+/// Resolve a `subagent_type` to an `AgentDefinition`, consulting the built-ins.
+///
+/// Matches on `name` first, then on `subagent_type`. Falls back to
+/// `general-purpose` for unknown types (which always exists).
+pub fn resolve(subagent_type: &str) -> AgentDefinition {
+    let defs = builtin_definitions();
+    if let Some(def) = defs.get(subagent_type) {
+        return def.clone();
+    }
+    if let Some(def) = defs.values().find(|d| d.subagent_type == subagent_type) {
+        return def.clone();
+    }
+    defs.get("general-purpose")
+        .cloned()
+        .expect("general-purpose built-in must exist")
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +415,19 @@ impl AgentDefinitionLoader {
         Self { roots }
     }
 
+    /// Like [`load_all`](Self::load_all) but seeds the registry with the
+    /// built-in agent definitions first, so YAML files override built-ins by
+    /// name. This is the entry point the orchestrator uses.
+    pub async fn load_with_builtins(&self) -> Result<AgentDefinitionRegistry, AgentDefError> {
+        let yaml = self.load_all().await?;
+        let mut defs = builtin_definitions();
+        // YAML wins on name collision.
+        for (name, def) in yaml.defs {
+            defs.insert(name, def);
+        }
+        Ok(AgentDefinitionRegistry::new(defs))
+    }
+
     /// Walk all roots, parse every `.yaml` file found, and return a registry.
     ///
     /// Files that cannot be parsed are skipped after emitting a `tracing::warn!`.
@@ -334,7 +443,11 @@ impl AgentDefinitionLoader {
             let mut read_dir = match tokio::fs::read_dir(root).await {
                 Ok(rd) => rd,
                 Err(e) => {
-                    warn!("agent_definitions: cannot read directory {}: {}", root.display(), e);
+                    warn!(
+                        "agent_definitions: cannot read directory {}: {}",
+                        root.display(),
+                        e
+                    );
                     continue;
                 }
             };
@@ -351,7 +464,11 @@ impl AgentDefinitionLoader {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        warn!("agent_definitions: error reading entry in {}: {}", root.display(), e);
+                        warn!(
+                            "agent_definitions: error reading entry in {}: {}",
+                            root.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -363,10 +480,7 @@ impl AgentDefinitionLoader {
                         defs.insert(def.name.clone(), def);
                     }
                     Err(e) => {
-                        warn!(
-                            "agent_definitions: skipping {} — {e}",
-                            path.display()
-                        );
+                        warn!("agent_definitions: skipping {} — {e}", path.display());
                     }
                 }
             }
@@ -376,7 +490,9 @@ impl AgentDefinitionLoader {
     }
 
     /// Parse a single YAML file into an `AgentDefinition`.
-    async fn load_file(path: &Path) -> Result<AgentDefinition, Box<dyn std::error::Error + Send + Sync>> {
+    async fn load_file(
+        path: &Path,
+    ) -> Result<AgentDefinition, Box<dyn std::error::Error + Send + Sync>> {
         let content = tokio::fs::read_to_string(path).await?;
         let raw: RawAgentDef = serde_yaml::from_str(&content)?;
 
@@ -519,7 +635,11 @@ background: true
         assert_eq!(
             foo.tools,
             ToolPolicy::AllowList {
-                list: vec!["bash".to_string(), "file_read".to_string(), "grep".to_string()]
+                list: vec![
+                    "bash".to_string(),
+                    "file_read".to_string(),
+                    "grep".to_string()
+                ]
             }
         );
         assert_eq!(foo.isolation_mode, IsolationMode::Worktree);
@@ -532,8 +652,14 @@ background: true
         assert_eq!(foo.skills, vec!["git".to_string(), "review".to_string()]);
         assert_eq!(foo.mcp_servers.len(), 1);
         assert!(!foo.background);
-        assert_eq!(foo.initial_prompt.as_deref(), Some("Start by reading the PR diff."));
-        assert_eq!(foo.critical_system_reminder.as_deref(), Some("Be thorough."));
+        assert_eq!(
+            foo.initial_prompt.as_deref(),
+            Some("Start by reading the PR diff.")
+        );
+        assert_eq!(
+            foo.critical_system_reminder.as_deref(),
+            Some("Be thorough.")
+        );
         assert!(foo.omit_claude_md);
         assert_eq!(foo.subagent_type, "pr-reviewer");
 
@@ -575,9 +701,21 @@ description: Minimal agent
         let registry = run(loader.load_all()).unwrap();
 
         let def = registry.get("minimal").expect("minimal should load");
-        assert_eq!(def.tools, ToolPolicy::AllowAll, "tools should default to AllowAll");
-        assert_eq!(def.isolation_mode, IsolationMode::None, "isolation_mode should default to None");
-        assert_eq!(def.memory_scope, MemoryScope::Inherit, "memory_scope should default to Inherit");
+        assert_eq!(
+            def.tools,
+            ToolPolicy::AllowAll,
+            "tools should default to AllowAll"
+        );
+        assert_eq!(
+            def.isolation_mode,
+            IsolationMode::None,
+            "isolation_mode should default to None"
+        );
+        assert_eq!(
+            def.memory_scope,
+            MemoryScope::Inherit,
+            "memory_scope should default to Inherit"
+        );
         assert!(def.model.is_none());
         assert!(def.effort.is_none());
         assert!(def.system_prompt.is_none());
@@ -593,7 +731,10 @@ description: Minimal agent
         assert!(def.initial_prompt.is_none());
         assert!(def.critical_system_reminder.is_none());
         assert!(!def.omit_claude_md);
-        assert_eq!(def.subagent_type, "minimal", "subagent_type should default to name");
+        assert_eq!(
+            def.subagent_type, "minimal",
+            "subagent_type should default to name"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -626,8 +767,14 @@ description: A good agent
         let loader = AgentDefinitionLoader::with_roots(vec![agents_dir.clone()]);
         let registry = run(loader.load_all()).unwrap();
 
-        assert!(registry.get("broken").is_none(), "broken YAML should be skipped");
-        assert!(registry.get("good").is_some(), "good file should still load");
+        assert!(
+            registry.get("broken").is_none(),
+            "broken YAML should be skipped"
+        );
+        assert!(
+            registry.get("good").is_some(),
+            "good file should still load"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -660,14 +807,16 @@ model: project-model
         );
 
         // home_agents has lower priority (index 0), project_agents wins (index 1)
-        let loader = AgentDefinitionLoader::with_roots(vec![
-            home_agents.clone(),
-            project_agents.clone(),
-        ]);
+        let loader =
+            AgentDefinitionLoader::with_roots(vec![home_agents.clone(), project_agents.clone()]);
         let registry = run(loader.load_all()).unwrap();
 
         let def = registry.get("shared").expect("shared should exist");
-        assert_eq!(def.model.as_deref(), Some("project-model"), "project should win");
+        assert_eq!(
+            def.model.as_deref(),
+            Some("project-model"),
+            "project should win"
+        );
         assert_eq!(def.description, "Project version");
     }
 
@@ -715,9 +864,9 @@ model: project-model
     // -----------------------------------------------------------------------
     #[test]
     fn test_nonexistent_roots_are_skipped() {
-        let loader = AgentDefinitionLoader::with_roots(vec![
-            PathBuf::from("/nonexistent/path/that/does/not/exist"),
-        ]);
+        let loader = AgentDefinitionLoader::with_roots(vec![PathBuf::from(
+            "/nonexistent/path/that/does/not/exist",
+        )]);
         let registry = run(loader.load_all()).unwrap();
         assert_eq!(registry.list().len(), 0);
     }
@@ -853,6 +1002,72 @@ maxTurns: 42
     }
 
     // -----------------------------------------------------------------------
+    // Built-in definitions + resolver
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_builtin_definitions_present_with_expected_policies() {
+        let defs = builtin_definitions();
+        assert_eq!(
+            defs.get("general-purpose").unwrap().tools,
+            ToolPolicy::AllowAll
+        );
+        assert_eq!(defs.get("worker").unwrap().tools, ToolPolicy::AllowAll);
+
+        let deny = ToolPolicy::DenyList {
+            list: vec![
+                "Edit".to_string(),
+                "Write".to_string(),
+                "NotebookEdit".to_string(),
+            ],
+        };
+        assert_eq!(defs.get("Explore").unwrap().tools, deny);
+        assert_eq!(defs.get("Plan").unwrap().tools, deny);
+    }
+
+    #[test]
+    fn test_resolve_known_and_unknown() {
+        assert_eq!(resolve("Explore").name, "Explore");
+        // Unknown falls back to general-purpose.
+        assert_eq!(resolve("does-not-exist").name, "general-purpose");
+    }
+
+    #[tokio::test]
+    async fn test_load_with_builtins_yaml_overrides() {
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // Override the built-in `worker` via YAML.
+        write_yaml(
+            &agents_dir,
+            "worker",
+            r#"
+description: Custom worker from YAML
+tools:
+  type: deny_list
+  list: [bash]
+"#,
+        );
+
+        let loader = AgentDefinitionLoader::with_roots(vec![agents_dir.clone()]);
+        let registry = loader.load_with_builtins().await.unwrap();
+
+        // Built-ins still present.
+        assert!(registry.get("general-purpose").is_some());
+        assert!(registry.get("Explore").is_some());
+
+        // YAML overrode the built-in worker.
+        let worker = registry.get("worker").unwrap();
+        assert_eq!(worker.description, "Custom worker from YAML");
+        assert_eq!(
+            worker.tools,
+            ToolPolicy::DenyList {
+                list: vec!["bash".to_string()]
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Test 10: camelCase aliases work (mcpServers, permissionMode, etc.)
     // -----------------------------------------------------------------------
     #[test]
@@ -883,7 +1098,10 @@ omitClaudeMd: true
         let def = registry.get("camel").expect("camel should load");
         assert_eq!(def.permission_mode.as_deref(), Some("bypassPermissions"));
         assert_eq!(def.mcp_servers.len(), 1);
-        assert_eq!(def.required_mcp_servers, vec!["required-server".to_string()]);
+        assert_eq!(
+            def.required_mcp_servers,
+            vec!["required-server".to_string()]
+        );
         assert_eq!(def.initial_prompt.as_deref(), Some("Hello camel"));
         assert_eq!(def.critical_system_reminder.as_deref(), Some("Important"));
         assert!(def.omit_claude_md);

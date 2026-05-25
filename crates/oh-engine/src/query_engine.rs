@@ -171,6 +171,9 @@ impl QueryEngine {
             max_turns: self.max_turns,
             hook_executor: self.hook_executor.clone(),
             tool_metadata: self.tool_metadata.clone(),
+            agent_id: oh_types::subagent::AgentId::new("main"),
+            parent_id: None,
+            session_id: None,
         };
 
         let events = run_query(&context, &mut self.messages).await?;

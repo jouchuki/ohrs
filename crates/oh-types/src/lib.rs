@@ -13,6 +13,7 @@ pub mod plugin;
 pub mod skills;
 pub mod state;
 pub mod stream_events;
+pub mod subagent;
 pub mod tasks;
 pub mod tools;
 pub mod ui;

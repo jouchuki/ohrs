@@ -51,6 +51,9 @@ pub enum HookEvent {
     PostCommand,
     PreClearHistory,
     PostClearHistory,
+    SubagentStart,
+    SubagentStop,
+    SubagentMessage,
 }
 
 impl std::fmt::Display for HookEvent {
@@ -282,6 +285,21 @@ mod tests {
         for (event, expected) in variants {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(json, expected);
+        }
+    }
+
+    #[test]
+    fn test_hook_event_subagent_variants_serde() {
+        let variants = vec![
+            (HookEvent::SubagentStart, "\"subagent_start\""),
+            (HookEvent::SubagentStop, "\"subagent_stop\""),
+            (HookEvent::SubagentMessage, "\"subagent_message\""),
+        ];
+        for (event, expected) in variants {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(json, expected);
+            let deser: HookEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, event);
         }
     }
 

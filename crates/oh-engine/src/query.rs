@@ -13,6 +13,7 @@ use oh_types::api::*;
 use oh_types::messages::*;
 use oh_types::permissions::PermissionRequest;
 use oh_types::stream_events::*;
+use oh_types::subagent::AgentId;
 use oh_types::tools::ToolExecutionContext;
 use opentelemetry::KeyValue;
 use tracing::{info_span, Instrument};
@@ -39,6 +40,13 @@ pub struct QueryContext {
     pub max_turns: u32,
     pub hook_executor: Option<Arc<dyn HookExecutorTrait>>,
     pub tool_metadata: std::collections::HashMap<String, serde_json::Value>,
+    /// Identity of this agent run. The top-level/main agent uses
+    /// `AgentId("main")`; subagents get their own id.
+    pub agent_id: AgentId,
+    /// The id of the agent that spawned this one, if any.
+    pub parent_id: Option<AgentId>,
+    /// The persistent session id this run records into (when recording is on).
+    pub session_id: Option<String>,
 }
 
 impl QueryContext {
@@ -223,6 +231,53 @@ pub async fn run_query(
     Err(EngineError::MaxTurnsExceeded(context.max_turns))
 }
 
+/// Run a subagent: a nested [`run_query`] carrying its own [`QueryContext`]
+/// (same `hook_executor` + `permission_checker` as the parent), seeded with
+/// `prompt`. Fires [`HookEvent::SubagentStart`] before the body and
+/// [`HookEvent::SubagentStop`] after it, then returns the final assistant text.
+///
+/// Phase 0: this delegates to `run_query` with a single seeded user message and
+/// returns the concatenated text of the last assistant turn. The Start/Stop
+/// hooks bracket the body so blocks/webhooks/recording ride the existing
+/// pipeline.
+pub async fn run_subagent(ctx: QueryContext, prompt: String) -> Result<String, EngineError> {
+    ctx.fire_hook(
+        HookEvent::SubagentStart,
+        serde_json::json!({
+            "agent_id": ctx.agent_id.as_str(),
+            "parent_id": ctx.parent_id.as_ref().map(|p| p.as_str()),
+            "session_id": ctx.session_id,
+            "prompt": prompt,
+        }),
+    )
+    .await;
+
+    let mut messages = vec![ConversationMessage::from_user_text(&prompt)];
+    let result = run_query(&ctx, &mut messages).await;
+
+    // Extract the text of the final assistant message produced by the run.
+    let final_text = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant)
+        .map(|m| m.text())
+        .unwrap_or_default();
+
+    ctx.fire_hook(
+        HookEvent::SubagentStop,
+        serde_json::json!({
+            "agent_id": ctx.agent_id.as_str(),
+            "parent_id": ctx.parent_id.as_ref().map(|p| p.as_str()),
+            "session_id": ctx.session_id,
+            "ok": result.is_ok(),
+            "result": final_text,
+        }),
+    )
+    .await;
+
+    result.map(|_| final_text)
+}
+
 /// Execute a single tool call with permission checks and hooks.
 async fn execute_tool_call(
     context: &QueryContext,
@@ -328,6 +383,8 @@ async fn execute_tool_call(
         let tool_ctx = ToolExecutionContext {
             cwd: context.cwd.clone(),
             metadata: context.tool_metadata.clone(),
+            subagents: None,
+            tasks: None,
         };
         let result = tool.execute(input_value, &tool_ctx).await;
 
@@ -428,4 +485,109 @@ pub enum EngineError {
     NoResponse,
     #[error("exceeded maximum turn limit ({0})")]
     MaxTurnsExceeded(u32),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use oh_config::PermissionSettings;
+    use oh_hooks::AggregatedHookResult;
+    use oh_permissions::PermissionChecker;
+    use std::pin::Pin;
+    use std::sync::Mutex as StdMutex;
+
+    /// Fake client that yields a single assistant text message.
+    struct FakeApiClient {
+        text: String,
+    }
+
+    #[async_trait]
+    impl StreamingApiClient for FakeApiClient {
+        async fn stream_message(
+            &self,
+            _request: ApiMessageRequest,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
+            ApiError,
+        > {
+            let msg = ConversationMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text(TextBlock::new(self.text.clone()))],
+            };
+            let events = vec![Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
+                message: msg,
+                usage: UsageSnapshot::default(),
+                stop_reason: Some("end_turn".into()),
+            }))];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// Hook executor that records every event it sees.
+    struct RecordingHookExecutor {
+        events: Arc<StdMutex<Vec<HookEvent>>>,
+    }
+
+    #[async_trait]
+    impl HookExecutorTrait for RecordingHookExecutor {
+        async fn execute(
+            &self,
+            event: HookEvent,
+            _payload: serde_json::Value,
+        ) -> AggregatedHookResult {
+            self.events.lock().unwrap().push(event);
+            AggregatedHookResult::default()
+        }
+    }
+
+    fn make_ctx(text: &str, events: Arc<StdMutex<Vec<HookEvent>>>) -> QueryContext {
+        QueryContext {
+            api_client: Arc::new(FakeApiClient { text: text.into() }),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            permission_checker: Arc::new(PermissionChecker::new(PermissionSettings::default())),
+            cwd: PathBuf::from("/tmp"),
+            model: "test-model".into(),
+            system_prompt: "test".into(),
+            max_tokens: 1024,
+            permission_prompt: None,
+            ask_user_prompt: None,
+            max_turns: 5,
+            hook_executor: Some(Arc::new(RecordingHookExecutor { events })),
+            tool_metadata: std::collections::HashMap::new(),
+            agent_id: AgentId::new("sub-1"),
+            parent_id: Some(AgentId::new("main")),
+            session_id: Some("sess-1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_subagent_returns_assistant_text() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let ctx = make_ctx("subagent done", Arc::clone(&events));
+        let out = run_subagent(ctx, "do the thing".into()).await.unwrap();
+        assert_eq!(out, "subagent done");
+    }
+
+    #[tokio::test]
+    async fn test_run_subagent_fires_start_and_stop_hooks() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let ctx = make_ctx("ok", Arc::clone(&events));
+        let _ = run_subagent(ctx, "go".into()).await.unwrap();
+
+        let seen = events.lock().unwrap();
+        assert!(
+            seen.contains(&HookEvent::SubagentStart),
+            "SubagentStart not fired: {seen:?}"
+        );
+        assert!(
+            seen.contains(&HookEvent::SubagentStop),
+            "SubagentStop not fired: {seen:?}"
+        );
+        // Start must precede Stop.
+        let start = seen.iter().position(|e| *e == HookEvent::SubagentStart);
+        let stop = seen.iter().position(|e| *e == HookEvent::SubagentStop);
+        assert!(start < stop, "Start should precede Stop: {seen:?}");
+    }
 }

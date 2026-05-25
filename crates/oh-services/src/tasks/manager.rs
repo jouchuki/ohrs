@@ -238,11 +238,7 @@ impl BackgroundTaskManager {
             .collect()
     }
 
-    pub async fn update_task(
-        &self,
-        id: &str,
-        description: Option<&str>,
-    ) -> Option<TaskRecord> {
+    pub async fn update_task(&self, id: &str, description: Option<&str>) -> Option<TaskRecord> {
         let mut guard = self.inner.lock().await;
         if let Some(lt) = guard.tasks.get_mut(id) {
             if let Some(desc) = description {
@@ -315,6 +311,38 @@ impl BackgroundTaskManager {
 impl Default for BackgroundTaskManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── BackgroundTasks trait impl ────────────────────────────────────────────────
+//
+// Thin delegation to the inherent methods so tools can reach the manager via the
+// `oh_types::BackgroundTasks` trait object without a dependency cycle.
+
+#[async_trait::async_trait]
+impl oh_types::subagent::BackgroundTasks for BackgroundTaskManager {
+    async fn create_shell(&self, command: &str, description: &str, cwd: &str) -> TaskRecord {
+        self.create_shell_task(command, description, cwd).await
+    }
+
+    async fn create_agent(&self, prompt: &str, description: &str, cwd: &str) -> TaskRecord {
+        self.create_agent_task(prompt, description, cwd).await
+    }
+
+    async fn get(&self, id: &str) -> Option<TaskRecord> {
+        self.get_task(id).await
+    }
+
+    async fn list(&self, status: Option<TaskStatus>) -> Vec<TaskRecord> {
+        self.list_tasks(status).await
+    }
+
+    async fn stop(&self, id: &str) -> Option<TaskRecord> {
+        self.stop_task(id).await
+    }
+
+    async fn read_output(&self, id: &str, max_bytes: usize) -> Result<String, String> {
+        BackgroundTaskManager::read_output(self, id, max_bytes).await
     }
 }
 
@@ -614,7 +642,9 @@ mod tests {
             }))
             .await;
 
-        let task = mgr.create_shell_task("echo done", "listener test", "/tmp").await;
+        let task = mgr
+            .create_shell_task("echo done", "listener test", "/tmp")
+            .await;
         let task_id = task.id.clone();
 
         for _ in 0..50 {
@@ -625,7 +655,42 @@ mod tests {
             }
         }
 
-        assert!(fired.load(Ordering::SeqCst), "completion listener was not fired");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "completion listener was not fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_background_tasks_trait_delegates() {
+        use oh_types::subagent::BackgroundTasks;
+
+        let mgr = BackgroundTaskManager::new();
+        let mgr: &dyn BackgroundTasks = &mgr;
+
+        let task = mgr
+            .create_shell("echo via-trait", "trait test", "/tmp")
+            .await;
+        let task_id = task.id.clone();
+
+        // get() via the trait returns the same record.
+        let got = mgr.get(&task_id).await.expect("task should exist");
+        assert_eq!(got.id, task_id);
+
+        // list() via the trait includes it.
+        let listed = mgr.list(None).await;
+        assert!(listed.iter().any(|r| r.id == task_id));
+
+        // Poll for completion, then read_output() via the trait.
+        for _ in 0..50 {
+            sleep(Duration::from_millis(100)).await;
+            let r = mgr.get(&task_id).await.unwrap();
+            if r.status != TaskStatus::Running && r.status != TaskStatus::Pending {
+                break;
+            }
+        }
+        let output = mgr.read_output(&task_id, 65536).await.unwrap();
+        assert!(output.contains("via-trait"), "output: {output:?}");
     }
 
     #[tokio::test]

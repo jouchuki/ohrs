@@ -3,12 +3,23 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::subagent::{BackgroundTasks, SubagentSpawner};
 
 /// Shared execution context for tool invocations.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually because the service handles
+/// (`subagents`/`tasks`) are trait objects that are not themselves `Debug`.
+#[derive(Clone)]
 pub struct ToolExecutionContext {
     pub cwd: PathBuf,
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Handle for spawning subagents (set by the harness; `None` in plain tool
+    /// contexts and tests).
+    pub subagents: Option<Arc<dyn SubagentSpawner>>,
+    /// Handle for the background-task control plane.
+    pub tasks: Option<Arc<dyn BackgroundTasks>>,
 }
 
 impl ToolExecutionContext {
@@ -16,7 +27,23 @@ impl ToolExecutionContext {
         Self {
             cwd,
             metadata: HashMap::new(),
+            subagents: None,
+            tasks: None,
         }
+    }
+}
+
+impl std::fmt::Debug for ToolExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolExecutionContext")
+            .field("cwd", &self.cwd)
+            .field("metadata", &self.metadata)
+            .field(
+                "subagents",
+                &self.subagents.as_ref().map(|_| "<SubagentSpawner>"),
+            )
+            .field("tasks", &self.tasks.as_ref().map(|_| "<BackgroundTasks>"))
+            .finish()
     }
 }
 
@@ -79,6 +106,8 @@ mod tests {
         let ctx = ToolExecutionContext::new(PathBuf::from("/tmp"));
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
         assert!(ctx.metadata.is_empty());
+        assert!(ctx.subagents.is_none());
+        assert!(ctx.tasks.is_none());
     }
 
     #[test]
