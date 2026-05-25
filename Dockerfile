@@ -53,9 +53,9 @@ COPY --from=builder /usr/local/bin/oh /usr/local/bin/oh
 # OCI labels — overwritten/augmented by docker/metadata-action in CI.
 ARG OHRS_VERSION="0.1.0"
 ARG OHRS_VCS_REF="unknown"
-LABEL org.opencontainers.image.title="openharness-rs" \
+LABEL org.opencontainers.image.title="ohrs" \
       org.opencontainers.image.description="OpenHarness CLI (oh) — AI-powered coding assistant" \
-      org.opencontainers.image.source="https://github.com/HKUDS/openharness-rs" \
+      org.opencontainers.image.source="https://github.com/jouchuki/ohrs" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${OHRS_VERSION}" \
       org.opencontainers.image.revision="${OHRS_VCS_REF}"
