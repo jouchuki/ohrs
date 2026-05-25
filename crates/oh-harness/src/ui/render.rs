@@ -53,12 +53,15 @@ fn render_conversation(f: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(
-                "  OpenHarness",
+                "  ohrs",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" v0.1.0", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                concat!(" v", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
         lines.push(Line::from(vec![Span::styled(
             "  An AI-powered coding assistant",

@@ -12,7 +12,7 @@ use oh_tools::create_default_tool_registry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// OpenHarness — an AI-powered coding assistant
+/// ohrs — an AI-powered coding assistant
 #[derive(Parser, Debug)]
 #[command(name = "openharness", version, about)]
 pub struct Args {

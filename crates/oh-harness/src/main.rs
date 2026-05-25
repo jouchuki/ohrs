@@ -1,4 +1,4 @@
-//! OpenHarness CLI — an AI-powered coding assistant.
+//! ohrs — an AI-powered coding assistant.
 
 mod cli;
 mod run_once;

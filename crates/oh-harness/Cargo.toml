@@ -3,7 +3,7 @@ name = "oh-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "OpenHarness CLI binary — AI-powered coding assistant"
+description = "ohrs — AI-powered coding assistant"
 
 [[bin]]
 name = "oh"
