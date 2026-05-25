@@ -56,12 +56,15 @@ impl crate::traits::Tool for TaskOutputTool {
             return ToolResult::error("max_bytes must be greater than 0");
         }
 
-        if context.metadata.get("task_manager").is_none() {
-            return ToolResult::error("Task manager not available");
-        }
+        let tasks = match context.tasks.as_ref() {
+            Some(t) => t,
+            None => return ToolResult::error("Task manager not available"),
+        };
 
-        // Actual output reading is wired at the CLI level.
-        ToolResult::success(format!("(no output for task {id})"))
+        match tasks.read_output(id, max_bytes).await {
+            Ok(output) => ToolResult::success(output),
+            Err(e) => ToolResult::error(format!("Failed to read task output: {e}")),
+        }
     }
 }
 
@@ -69,10 +72,28 @@ impl crate::traits::Tool for TaskOutputTool {
 mod tests {
     use super::*;
     use crate::traits::Tool;
+    use oh_services::tasks::BackgroundTaskManager;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(PathBuf::from("/tmp"))
+    }
+
+    async fn ctx_with_completed_task() -> (ToolExecutionContext, String) {
+        let mgr = Arc::new(BackgroundTaskManager::new());
+        let record = mgr.create_shell_task("echo task-output-xyz", "t", "/tmp").await;
+        // Poll for completion so the log is populated.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let r = mgr.get_task(&record.id).await.unwrap();
+            if r.status != oh_types::tasks::TaskStatus::Running {
+                break;
+            }
+        }
+        let mut c = ctx();
+        c.tasks = Some(mgr);
+        (c, record.id)
     }
 
     #[test]
@@ -121,26 +142,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_success_with_default_max_bytes() {
-        let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
+        let (context, id) = ctx_with_completed_task().await;
         let result = TaskOutputTool
-            .execute(serde_json::json!({"id": "task-5"}), &context)
+            .execute(serde_json::json!({"id": id}), &context)
             .await;
-        assert!(!result.is_error);
-        assert!(result.output.contains("task-5"));
+        assert!(!result.is_error, "output: {}", result.output);
+        assert!(result.output.contains("task-output-xyz"));
     }
 
     #[tokio::test]
     async fn test_success_with_custom_max_bytes() {
-        let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
+        let (context, id) = ctx_with_completed_task().await;
         let result = TaskOutputTool
             .execute(
-                serde_json::json!({"id": "task-5", "max_bytes": 5000}),
+                serde_json::json!({"id": id, "max_bytes": 5000}),
                 &context,
             )
             .await;

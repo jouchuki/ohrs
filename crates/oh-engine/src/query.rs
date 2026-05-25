@@ -13,7 +13,7 @@ use oh_types::api::*;
 use oh_types::messages::*;
 use oh_types::permissions::PermissionRequest;
 use oh_types::stream_events::*;
-use oh_types::subagent::AgentId;
+use oh_types::subagent::{AgentId, BackgroundTasks, SubagentSpawner};
 use oh_types::tools::ToolExecutionContext;
 use opentelemetry::KeyValue;
 use tracing::{info_span, Instrument};
@@ -47,6 +47,13 @@ pub struct QueryContext {
     pub parent_id: Option<AgentId>,
     /// The persistent session id this run records into (when recording is on).
     pub session_id: Option<String>,
+    /// Handle for spawning subagents, threaded into the per-tool
+    /// [`ToolExecutionContext`] so the `Agent` tool can reach the orchestrator.
+    /// `None` outside the harness (e.g. unit tests).
+    pub subagents: Option<Arc<dyn SubagentSpawner>>,
+    /// Handle for the background-task control plane, threaded into the per-tool
+    /// [`ToolExecutionContext`] for the `Task*` tools.
+    pub tasks: Option<Arc<dyn BackgroundTasks>>,
 }
 
 impl QueryContext {
@@ -246,6 +253,7 @@ pub async fn run_subagent(ctx: QueryContext, prompt: String) -> Result<String, E
         serde_json::json!({
             "agent_id": ctx.agent_id.as_str(),
             "parent_id": ctx.parent_id.as_ref().map(|p| p.as_str()),
+            "subagent_type": ctx.tool_metadata.get("subagent_type"),
             "session_id": ctx.session_id,
             "prompt": prompt,
         }),
@@ -263,13 +271,21 @@ pub async fn run_subagent(ctx: QueryContext, prompt: String) -> Result<String, E
         .map(|m| m.text())
         .unwrap_or_default();
 
+    // Turn count = number of assistant messages the run produced.
+    let turns = messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .count();
+
     ctx.fire_hook(
         HookEvent::SubagentStop,
         serde_json::json!({
             "agent_id": ctx.agent_id.as_str(),
             "parent_id": ctx.parent_id.as_ref().map(|p| p.as_str()),
+            "subagent_type": ctx.tool_metadata.get("subagent_type"),
             "session_id": ctx.session_id,
             "ok": result.is_ok(),
+            "turns": turns,
             "result": final_text,
         }),
     )
@@ -383,8 +399,8 @@ async fn execute_tool_call(
         let tool_ctx = ToolExecutionContext {
             cwd: context.cwd.clone(),
             metadata: context.tool_metadata.clone(),
-            subagents: None,
-            tasks: None,
+            subagents: context.subagents.clone(),
+            tasks: context.tasks.clone(),
         };
         let result = tool.execute(input_value, &tool_ctx).await;
 
@@ -559,6 +575,8 @@ mod tests {
             agent_id: AgentId::new("sub-1"),
             parent_id: Some(AgentId::new("main")),
             session_id: Some("sess-1".into()),
+            subagents: None,
+            tasks: None,
         }
     }
 
@@ -589,5 +607,191 @@ mod tests {
         let start = seen.iter().position(|e| *e == HookEvent::SubagentStart);
         let stop = seen.iter().position(|e| *e == HookEvent::SubagentStop);
         assert!(start < stop, "Start should precede Stop: {seen:?}");
+    }
+
+    // ── Control-plane proof tests ────────────────────────────────────────────
+    //
+    // A subagent is just a nested `run_query` carrying the SAME hook executor as
+    // its parent, so it inherits blocks and webhooks for free. These tests prove
+    // both ride the existing pipeline.
+
+    use oh_hooks::HookResult;
+    use oh_types::tools::{ToolExecutionContext, ToolResult};
+
+    /// Fake client that issues exactly one `bash` tool call on the first turn,
+    /// then returns a final text message on the second turn. This lets us drive
+    /// the `PreToolUse` gate from within a subagent run.
+    struct ToolThenTextClient {
+        turn: std::sync::atomic::AtomicUsize,
+        final_text: String,
+    }
+
+    #[async_trait]
+    impl StreamingApiClient for ToolThenTextClient {
+        async fn stream_message(
+            &self,
+            _request: ApiMessageRequest,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
+            ApiError,
+        > {
+            use std::sync::atomic::Ordering;
+            let n = self.turn.fetch_add(1, Ordering::SeqCst);
+            let msg = if n == 0 {
+                ConversationMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse(ToolUseBlock::new(
+                        "bash",
+                        std::collections::HashMap::new(),
+                    ))],
+                }
+            } else {
+                ConversationMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text(TextBlock::new(self.final_text.clone()))],
+                }
+            };
+            let events = vec![Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
+                message: msg,
+                usage: UsageSnapshot::default(),
+                stop_reason: Some("end_turn".into()),
+            }))];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// A trivial tool that records when it executes, so a block can be detected
+    /// by the *absence* of execution.
+    struct SpyTool {
+        executed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl oh_tools::Tool for SpyTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "spy"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn is_read_only(&self, _a: &serde_json::Value) -> bool {
+            true
+        }
+        async fn execute(&self, _a: serde_json::Value, _c: &ToolExecutionContext) -> ToolResult {
+            self.executed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            ToolResult::success("ran")
+        }
+    }
+
+    /// Hook executor that BLOCKS a configured event (mirrors `block_on_failure`)
+    /// and records every event it sees.
+    struct BlockingHookExecutor {
+        block_on: HookEvent,
+        events: Arc<StdMutex<Vec<HookEvent>>>,
+    }
+
+    #[async_trait]
+    impl HookExecutorTrait for BlockingHookExecutor {
+        async fn execute(
+            &self,
+            event: HookEvent,
+            _payload: serde_json::Value,
+        ) -> AggregatedHookResult {
+            self.events.lock().unwrap().push(event);
+            if event == self.block_on {
+                AggregatedHookResult {
+                    results: vec![HookResult {
+                        success: false,
+                        blocked: true,
+                        reason: "blocked by policy".into(),
+                        ..Default::default()
+                    }],
+                }
+            } else {
+                AggregatedHookResult::default()
+            }
+        }
+    }
+
+    fn make_ctx_with_spy(
+        executed: Arc<std::sync::atomic::AtomicBool>,
+        hook_executor: Arc<dyn HookExecutorTrait>,
+    ) -> QueryContext {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(SpyTool { executed }));
+        QueryContext {
+            api_client: Arc::new(ToolThenTextClient {
+                turn: std::sync::atomic::AtomicUsize::new(0),
+                final_text: "done".into(),
+            }),
+            tool_registry: Arc::new(registry),
+            permission_checker: Arc::new(PermissionChecker::new(PermissionSettings::default())),
+            cwd: PathBuf::from("/tmp"),
+            model: "test-model".into(),
+            system_prompt: "test".into(),
+            max_tokens: 1024,
+            permission_prompt: None,
+            ask_user_prompt: None,
+            max_turns: 5,
+            hook_executor: Some(hook_executor),
+            tool_metadata: std::collections::HashMap::new(),
+            agent_id: AgentId::new("sub-blocking"),
+            parent_id: Some(AgentId::new("main")),
+            session_id: Some("sess-block".into()),
+            subagents: None,
+            tasks: None,
+        }
+    }
+
+    /// (a) A blocking `PreToolUse` hook aborts the subagent's tool action: the
+    /// tool never runs and the tool result carries the block reason.
+    #[tokio::test]
+    async fn test_blocking_pretooluse_hook_aborts_subagent_action() {
+        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let hooks = Arc::new(BlockingHookExecutor {
+            block_on: HookEvent::PreToolUse,
+            events: Arc::clone(&events),
+        });
+        let ctx = make_ctx_with_spy(Arc::clone(&executed), hooks);
+
+        // The subagent runs to completion (the block becomes a tool error, which
+        // the model "sees" and then finishes), but the underlying tool body must
+        // never have executed.
+        let out = run_subagent(ctx, "use the tool".into()).await.unwrap();
+        assert_eq!(out, "done");
+        assert!(
+            !executed.load(std::sync::atomic::Ordering::SeqCst),
+            "tool body ran despite a blocking PreToolUse hook"
+        );
+        let seen = events.lock().unwrap();
+        assert!(seen.contains(&HookEvent::PreToolUse));
+        assert!(seen.contains(&HookEvent::SubagentStart));
+    }
+
+    /// (b) A webhook-style hook executor is invoked on subagent lifecycle events.
+    /// We assert the stub received `SubagentStart` AND `SubagentStop` (the same
+    /// dispatch path an `HttpHookDefinition` would ride).
+    #[tokio::test]
+    async fn test_webhook_style_hook_invoked_on_subagent_lifecycle() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        // A non-blocking executor stands in for an HTTP/webhook hook: it simply
+        // observes every lifecycle event.
+        let ctx = make_ctx("hello", Arc::clone(&events));
+        let _ = run_subagent(ctx, "go".into()).await.unwrap();
+
+        let seen = events.lock().unwrap();
+        assert!(
+            seen.iter().filter(|e| **e == HookEvent::SubagentStart).count() == 1,
+            "webhook should be invoked once on SubagentStart: {seen:?}"
+        );
+        assert!(
+            seen.iter().filter(|e| **e == HookEvent::SubagentStop).count() == 1,
+            "webhook should be invoked once on SubagentStop: {seen:?}"
+        );
     }
 }

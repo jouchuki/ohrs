@@ -42,12 +42,21 @@ impl crate::traits::Tool for TaskStopTool {
             None => return ToolResult::error("Missing required parameter: id"),
         };
 
-        if context.metadata.get("task_manager").is_none() {
-            return ToolResult::error("Task manager not available");
-        }
+        let tasks = match context.tasks.as_ref() {
+            Some(t) => t,
+            None => return ToolResult::error("Task manager not available"),
+        };
 
-        // Actual stop is wired at the CLI level.
-        ToolResult::success(format!("Stopped task {id}"))
+        match tasks.stop(id).await {
+            Some(record) => ToolResult::success(
+                serde_json::json!({
+                    "id": record.id,
+                    "status": format!("{:?}", record.status).to_lowercase(),
+                })
+                .to_string(),
+            ),
+            None => ToolResult::error(format!("Task not found: {id}")),
+        }
     }
 }
 
@@ -55,7 +64,9 @@ impl crate::traits::Tool for TaskStopTool {
 mod tests {
     use super::*;
     use crate::traits::Tool;
+    use oh_services::tasks::BackgroundTaskManager;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(PathBuf::from("/tmp"))
@@ -99,14 +110,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_success() {
+        let mgr = Arc::new(BackgroundTaskManager::new());
+        let record = mgr.create_shell_task("sleep 30", "long", "/tmp").await;
         let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
+        context.tasks = Some(mgr);
         let result = TaskStopTool
-            .execute(serde_json::json!({"id": "task-99"}), &context)
+            .execute(serde_json::json!({"id": record.id}), &context)
             .await;
-        assert!(!result.is_error);
-        assert!(result.output.contains("Stopped task task-99"));
+        assert!(!result.is_error, "output: {}", result.output);
+        let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(v["status"], "killed");
+    }
+
+    #[tokio::test]
+    async fn test_unknown_task_errors() {
+        let mut context = ctx();
+        context.tasks = Some(Arc::new(BackgroundTaskManager::new()));
+        let result = TaskStopTool
+            .execute(serde_json::json!({"id": "nope"}), &context)
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("not found"));
     }
 }

@@ -30,6 +30,8 @@ pub struct QueryEngine {
     permission_prompt: Option<PermissionPromptFn>,
     ask_user_prompt: Option<AskUserPromptFn>,
     tool_metadata: std::collections::HashMap<String, serde_json::Value>,
+    subagents: Option<Arc<dyn oh_types::subagent::SubagentSpawner>>,
+    tasks: Option<Arc<dyn oh_types::subagent::BackgroundTasks>>,
 }
 
 impl QueryEngine {
@@ -58,7 +60,20 @@ impl QueryEngine {
             permission_prompt: None,
             ask_user_prompt: None,
             tool_metadata: std::collections::HashMap::new(),
+            subagents: None,
+            tasks: None,
         }
+    }
+
+    /// Inject the subagent-spawning handle so the `Agent` tool can reach the
+    /// orchestrator from within the query loop.
+    pub fn set_subagents(&mut self, subagents: Arc<dyn oh_types::subagent::SubagentSpawner>) {
+        self.subagents = Some(subagents);
+    }
+
+    /// Inject the background-task control plane so the `Task*` tools work.
+    pub fn set_tasks(&mut self, tasks: Arc<dyn oh_types::subagent::BackgroundTasks>) {
+        self.tasks = Some(tasks);
     }
 
     pub fn set_hook_executor(&mut self, executor: Arc<dyn HookExecutorTrait>) {
@@ -174,6 +189,8 @@ impl QueryEngine {
             agent_id: oh_types::subagent::AgentId::new("main"),
             parent_id: None,
             session_id: None,
+            subagents: self.subagents.clone(),
+            tasks: self.tasks.clone(),
         };
 
         let events = run_query(&context, &mut self.messages).await?;

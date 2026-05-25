@@ -37,5 +37,7 @@ serde_json.workspace = true
 tracing.workspace = true
 futures.workspace = true
 tempfile.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
 ratatui = "0.29"
 crossterm = "0.28"

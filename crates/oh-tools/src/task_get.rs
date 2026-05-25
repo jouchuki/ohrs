@@ -42,12 +42,24 @@ impl crate::traits::Tool for TaskGetTool {
             None => return ToolResult::error("Missing required parameter: id"),
         };
 
-        if context.metadata.get("task_manager").is_none() {
-            return ToolResult::error("Task manager not available");
-        }
+        let tasks = match context.tasks.as_ref() {
+            Some(t) => t,
+            None => return ToolResult::error("Task manager not available"),
+        };
 
-        // Actual lookup is wired at the CLI level.
-        ToolResult::success(format!("Task {id}: lookup delegated to task manager"))
+        match tasks.get(id).await {
+            Some(record) => ToolResult::success(
+                serde_json::json!({
+                    "id": record.id,
+                    "type": record.task_type,
+                    "status": format!("{:?}", record.status).to_lowercase(),
+                    "description": record.description,
+                    "return_code": record.return_code,
+                })
+                .to_string(),
+            ),
+            None => ToolResult::error(format!("Task not found: {id}")),
+        }
     }
 }
 
@@ -55,7 +67,9 @@ impl crate::traits::Tool for TaskGetTool {
 mod tests {
     use super::*;
     use crate::traits::Tool;
+    use oh_services::tasks::BackgroundTaskManager;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(PathBuf::from("/tmp"))
@@ -97,14 +111,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_success_with_task_manager() {
+        let mgr = Arc::new(BackgroundTaskManager::new());
+        let record = mgr.create_shell_task("echo hi", "t", "/tmp").await;
         let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
+        context.tasks = Some(mgr);
         let result = TaskGetTool
-            .execute(serde_json::json!({"id": "task-123"}), &context)
+            .execute(serde_json::json!({"id": record.id}), &context)
             .await;
-        assert!(!result.is_error);
-        assert!(result.output.contains("task-123"));
+        assert!(!result.is_error, "output: {}", result.output);
+        assert!(result.output.contains(&record.id));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_task_id_errors() {
+        let mut context = ctx();
+        context.tasks = Some(Arc::new(BackgroundTaskManager::new()));
+        let result = TaskGetTool
+            .execute(serde_json::json!({"id": "nope"}), &context)
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("not found"));
     }
 }

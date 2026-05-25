@@ -51,6 +51,10 @@ pub enum MessageKind {
     AgentReply,
     Status,
     Stop,
+    /// Posted by a finished subagent: carries its final result text and a
+    /// `stats` JSON blob (e.g. turn count, ok flag). The parent reads this from
+    /// the recipient's mailbox to learn the outcome of an in-process spawn.
+    IdleNotification,
     Custom(String),
 }
 

@@ -5,13 +5,19 @@ extern crate libc;
 
 use oh_types::tasks::{TaskRecord, TaskStatus, TaskType};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// Boxed future producing a subagent's final result (or an error string),
+/// driven by [`BackgroundTaskManager::create_in_process_task`].
+pub type InProcessJob = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 
 // ── Completion listener type ────────────────────────────────────────────────
 
@@ -149,20 +155,45 @@ impl BackgroundTaskManager {
     }
 
     /// Create and immediately start an agent task.
+    ///
+    /// The in-process subagent driver is provided by the caller via
+    /// [`create_in_process_task`](Self::create_in_process_task); this overload
+    /// (kept for the `BackgroundTasks::create_agent` trait + the `TaskCreate`
+    /// tool's prompt path) records an `InProcessTeammate` task with no driver
+    /// and immediately resolves it, writing the prompt to the log so
+    /// `read_output` is exercised. It is the degenerate "no runner injected"
+    /// case; real subagent spawns go through `create_in_process_task`.
     pub async fn create_agent_task(
         &self,
         prompt: &str,
         description: &str,
         cwd: &str,
     ) -> TaskRecord {
-        // TODO: implement agent task invocation
-        // The Python equivalent runs `python -m openharness --api-key <key>` and
-        // then writes the prompt to stdin.  The Rust equivalent would be something
-        // like `hermes chat -q <prompt>` or the `ohrs` binary once it exposes a
-        // one-shot mode.  For now we fall back to echoing the prompt so that the
-        // task infrastructure is exercised; replace the command below when the
-        // ohrs agent CLI is ready.
-        let command = format!("echo {}", shell_escape(prompt));
+        let prompt_owned = prompt.to_string();
+        self.create_in_process_task(
+            prompt,
+            description,
+            cwd,
+            Box::pin(async move { Ok(prompt_owned) }),
+        )
+        .await
+    }
+
+    /// Create an in-process teammate task: record an [`TaskType::InProcessTeammate`]
+    /// `TaskRecord`, spawn a tokio task that drives `job` to completion, tee its
+    /// result into the task log file, and transition the status
+    /// `Running → Completed/Failed`.
+    ///
+    /// This is the real Phase 1 spawn path: the `job` is the subagent's
+    /// `run_subagent` future (built by the harness-injected `SubagentRunner`),
+    /// returning the final assistant text on success.
+    pub async fn create_in_process_task(
+        &self,
+        prompt: &str,
+        description: &str,
+        cwd: &str,
+        job: InProcessJob,
+    ) -> TaskRecord {
         let id = Uuid::new_v4().to_string();
         let output_file = oh_config::get_tasks_dir().join(format!("{id}.log"));
 
@@ -173,12 +204,12 @@ impl BackgroundTaskManager {
 
         let record = TaskRecord {
             id: id.clone(),
-            task_type: TaskType::LocalAgent,
+            task_type: TaskType::InProcessTeammate,
             status: TaskStatus::Running,
             description: description.to_string(),
             cwd: cwd.to_string(),
             output_file: output_file.clone(),
-            command: Some(command.clone()),
+            command: None,
             prompt: Some(prompt.to_string()),
             created_at: now(),
             started_at: Some(now()),
@@ -202,12 +233,11 @@ impl BackgroundTaskManager {
             guard.tasks.insert(id.clone(), live);
         }
 
-        let watcher = spawn_and_watch(
+        let watcher = spawn_in_process(
             id.clone(),
-            command,
-            cwd.to_string(),
             output_file,
             Arc::clone(&self.inner),
+            job,
             kill_rx,
         );
 
@@ -515,6 +545,65 @@ fn spawn_and_watch(
     })
 }
 
+/// Drive an in-process [`InProcessJob`] to completion: write its result (or
+/// error) to `output_file`, then update the task record in `inner`. Honors a
+/// kill signal from `stop_task` by aborting the job.
+fn spawn_in_process(
+    task_id: String,
+    output_file: PathBuf,
+    inner: Arc<Mutex<Inner>>,
+    job: InProcessJob,
+    kill_rx: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let outcome: Option<Result<String, String>> = tokio::select! {
+            res = job => Some(res),
+            _ = kill_rx => None, // killed via stop_task
+        };
+
+        // Append the result/error text to the log file (best-effort).
+        if let Some(ref res) = outcome {
+            let text = match res {
+                Ok(s) => s.clone(),
+                Err(e) => e.clone(),
+            };
+            if let Ok(mut f) = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&output_file)
+                .await
+            {
+                let _ = f.write_all(text.as_bytes()).await;
+                let _ = f.flush().await;
+            }
+        }
+
+        let mut guard = inner.lock().await;
+        oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
+        if let Some(lt) = guard.tasks.get_mut(&task_id) {
+            // Preserve a Killed status set by stop_task.
+            if lt.record.status != TaskStatus::Killed {
+                match &outcome {
+                    Some(Ok(_)) => {
+                        lt.record.status = TaskStatus::Completed;
+                        lt.record.return_code = Some(0);
+                    }
+                    Some(Err(_)) => {
+                        lt.record.status = TaskStatus::Failed;
+                        lt.record.return_code = Some(-1);
+                    }
+                    None => {
+                        lt.record.status = TaskStatus::Killed;
+                        lt.record.return_code = Some(-1);
+                    }
+                }
+                lt.record.ended_at = Some(now());
+            }
+        }
+        notify_listeners(&mut guard, &task_id);
+    })
+}
+
 /// Fire all registered completion listeners for `task_id`.
 /// Must be called while holding the `Inner` lock.
 fn notify_listeners(guard: &mut Inner, task_id: &str) {
@@ -532,12 +621,6 @@ fn now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
-}
-
-/// Minimal shell escaping: wraps the string in single quotes and escapes
-/// embedded single quotes as `'\''`.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

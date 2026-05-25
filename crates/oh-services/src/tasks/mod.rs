@@ -2,4 +2,4 @@
 
 pub mod manager;
 
-pub use manager::BackgroundTaskManager;
+pub use manager::{BackgroundTaskManager, InProcessJob};

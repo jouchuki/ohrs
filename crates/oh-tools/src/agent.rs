@@ -1,7 +1,9 @@
 //! Spawn subagents for complex tasks tool.
 
 use async_trait::async_trait;
+use oh_types::subagent::{AgentId, SpawnRequest, SubagentIsolation};
 use oh_types::tools::{ToolExecutionContext, ToolResult};
+use uuid::Uuid;
 
 pub struct AgentTool;
 
@@ -56,17 +58,12 @@ impl crate::traits::Tool for AgentTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: &ToolExecutionContext,
+        context: &ToolExecutionContext,
     ) -> ToolResult {
         let prompt = match arguments.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p,
             None => return ToolResult::error("Missing required parameter: prompt"),
         };
-
-        let description = arguments
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent task");
 
         let subagent_type = arguments
             .get("subagent_type")
@@ -76,26 +73,50 @@ impl crate::traits::Tool for AgentTool {
         let model = arguments
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("default");
+            .map(String::from);
 
         let run_in_background = arguments
             .get("run_in_background")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let isolation = arguments
-            .get("isolation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("none");
+        let isolation = match arguments.get("isolation").and_then(|v| v.as_str()) {
+            Some("worktree") => SubagentIsolation::Worktree,
+            Some("subprocess") => SubagentIsolation::Subprocess,
+            _ => SubagentIsolation::InProcess,
+        };
 
-        ToolResult::success(format!(
-            "Spawned agent task: {description}\n\
-             Type: {subagent_type}\n\
-             Model: {model}\n\
-             Background: {run_in_background}\n\
-             Isolation: {isolation}\n\
-             Prompt: {prompt}"
-        ))
+        // Reach the orchestrator via the injected handle.
+        let spawner = match context.subagents.as_ref() {
+            Some(s) => s,
+            None => {
+                return ToolResult::error(
+                    "Subagent spawning is not available in this context \
+                     (no SubagentSpawner injected).",
+                )
+            }
+        };
+
+        let agent_id = AgentId::new(format!("agent-{}", Uuid::new_v4()));
+        let req = SpawnRequest {
+            agent_id: agent_id.clone(),
+            subagent_type: subagent_type.to_string(),
+            prompt: prompt.to_string(),
+            model,
+            run_in_background,
+            isolation,
+        };
+
+        match spawner.spawn(req).await {
+            Ok(res) => ToolResult::success(
+                serde_json::json!({
+                    "agent_id": res.agent_id.as_str(),
+                    "task_id": res.task_id,
+                })
+                .to_string(),
+            ),
+            Err(e) => ToolResult::error(format!("Failed to spawn subagent: {e}")),
+        }
     }
 }
 
@@ -103,10 +124,30 @@ impl crate::traits::Tool for AgentTool {
 mod tests {
     use super::*;
     use crate::traits::Tool;
+    use oh_types::subagent::{SpawnResult, SubagentError, SubagentSpawner};
     use oh_types::tools::ToolExecutionContext;
+    use std::sync::Arc;
 
     fn ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(std::env::current_dir().unwrap())
+    }
+
+    /// Stub spawner that echoes the request back as a deterministic task id.
+    struct StubSpawner;
+    #[async_trait]
+    impl SubagentSpawner for StubSpawner {
+        async fn spawn(&self, req: SpawnRequest) -> Result<SpawnResult, SubagentError> {
+            Ok(SpawnResult {
+                agent_id: req.agent_id,
+                task_id: format!("task-for-{}", req.subagent_type),
+            })
+        }
+    }
+
+    fn ctx_with_spawner() -> ToolExecutionContext {
+        let mut c = ctx();
+        c.subagents = Some(Arc::new(StubSpawner));
+        c
     }
 
     #[test]
@@ -138,33 +179,47 @@ mod tests {
     #[tokio::test]
     async fn test_execute_missing_prompt() {
         let tool = AgentTool;
-        let result = tool.execute(serde_json::json!({}), &ctx()).await;
+        let result = tool.execute(serde_json::json!({}), &ctx_with_spawner()).await;
         assert!(result.is_error);
         assert!(result.output.contains("prompt"));
     }
 
     #[tokio::test]
-    async fn test_execute_with_prompt() {
+    async fn test_execute_without_spawner_errors() {
+        let tool = AgentTool;
+        let result = tool
+            .execute(serde_json::json!({"prompt": "do something"}), &ctx())
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("not available"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_prompt_returns_handle_json() {
         let tool = AgentTool;
         let result = tool
             .execute(
                 serde_json::json!({"prompt": "do something", "description": "test task"}),
-                &ctx(),
+                &ctx_with_spawner(),
             )
             .await;
-        assert!(!result.is_error);
-        assert!(result.output.contains("Spawned agent task: test task"));
-        assert!(result.output.contains("do something"));
+        assert!(!result.is_error, "output: {}", result.output);
+        let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert!(v["agent_id"].as_str().unwrap().starts_with("agent-"));
+        assert_eq!(v["task_id"], "task-for-general-purpose");
     }
 
     #[tokio::test]
-    async fn test_execute_defaults() {
+    async fn test_execute_defaults_subagent_type() {
         let tool = AgentTool;
         let result = tool
-            .execute(serde_json::json!({"prompt": "hello"}), &ctx())
+            .execute(
+                serde_json::json!({"prompt": "hello"}),
+                &ctx_with_spawner(),
+            )
             .await;
         assert!(!result.is_error);
-        assert!(result.output.contains("general-purpose"));
-        assert!(result.output.contains("Model: default"));
+        let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(v["task_id"], "task-for-general-purpose");
     }
 }

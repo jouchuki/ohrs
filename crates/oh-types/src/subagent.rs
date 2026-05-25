@@ -135,6 +135,28 @@ pub trait SubagentSpawner: Send + Sync {
     async fn spawn(&self, req: SpawnRequest) -> Result<SpawnResult, SubagentError>;
 }
 
+/// Runs a single in-process subagent to completion and returns its final
+/// assistant text.
+///
+/// This is the seam that breaks the would-be dependency cycle. Building a child
+/// `QueryContext` requires `oh-engine`/`oh-tools`/`oh-api` types, but
+/// `oh-services` (where `SubagentManager` lives) is *below* `oh-engine` in the
+/// dependency graph (`oh-engine → oh-tools → oh-services`), so it cannot call
+/// `oh_engine::run_subagent` directly. Instead the harness — which sits on top
+/// of everything — constructs a `SubagentRunner` that owns the
+/// `QueryContext`-building logic and injects it into the `SubagentManager`. The
+/// manager invokes it from inside the background task it records, keeping the
+/// orchestration (definition resolution, backend selection, task recording) in
+/// `oh-services` while the engine wiring stays in `oh-harness`.
+#[async_trait]
+pub trait SubagentRunner: Send + Sync {
+    /// Run the subagent described by `req` (already resolved to `subagent_type`)
+    /// to completion. `tools` is the effective allowed-tool name set after
+    /// intersecting the agent definition's policy with the parent's tools; an
+    /// empty set means "no restriction beyond the parent's registry".
+    async fn run(&self, req: SpawnRequest, allowed_tools: Vec<String>) -> Result<String, String>;
+}
+
 /// Background-task control plane over `TaskRecord`s. Implemented by
 /// `oh_services::tasks::BackgroundTaskManager`.
 ///
@@ -208,6 +230,25 @@ mod tests {
         let json = serde_json::to_string(&res).unwrap();
         let deser: SpawnResult = serde_json::from_str(&json).unwrap();
         assert_eq!(deser, res);
+    }
+
+    #[test]
+    fn test_subagent_runner_is_object_safe() {
+        // `SubagentRunner` must be usable as a trait object (the manager holds an
+        // `Arc<dyn SubagentRunner>`). Constructing one here proves object safety
+        // without needing an async runtime in this dependency-free crate.
+        struct EchoRunner;
+        #[async_trait]
+        impl SubagentRunner for EchoRunner {
+            async fn run(
+                &self,
+                req: SpawnRequest,
+                allowed_tools: Vec<String>,
+            ) -> Result<String, String> {
+                Ok(format!("{}|tools={}", req.prompt, allowed_tools.len()))
+            }
+        }
+        let _runner: Box<dyn SubagentRunner> = Box::new(EchoRunner);
     }
 
     #[test]

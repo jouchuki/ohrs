@@ -2,6 +2,7 @@
 
 mod cli;
 mod run_once;
+mod subagent_runner;
 mod ui;
 
 use clap::Parser;

@@ -36,23 +36,40 @@ impl crate::traits::Tool for TaskListTool {
         arguments: serde_json::Value,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        // Validate status if provided
-        if let Some(status) = arguments.get("status").and_then(|v| v.as_str()) {
-            let valid = ["pending", "running", "completed", "failed", "killed"];
-            if !valid.contains(&status) {
+        // Validate status if provided, mapping to TaskStatus.
+        let status_filter = match arguments.get("status").and_then(|v| v.as_str()) {
+            Some("pending") => Some(oh_types::tasks::TaskStatus::Pending),
+            Some("running") => Some(oh_types::tasks::TaskStatus::Running),
+            Some("completed") => Some(oh_types::tasks::TaskStatus::Completed),
+            Some("failed") => Some(oh_types::tasks::TaskStatus::Failed),
+            Some("killed") => Some(oh_types::tasks::TaskStatus::Killed),
+            Some(other) => {
                 return ToolResult::error(format!(
-                    "Invalid status filter: {status}. Valid values: {}",
-                    valid.join(", ")
+                    "Invalid status filter: {other}. Valid values: \
+                     pending, running, completed, failed, killed"
                 ));
             }
-        }
+            None => None,
+        };
 
-        if context.metadata.get("task_manager").is_none() {
-            return ToolResult::error("Task manager not available");
-        }
+        let tasks = match context.tasks.as_ref() {
+            Some(t) => t,
+            None => return ToolResult::error("Task manager not available"),
+        };
 
-        // Actual listing is wired at the CLI level.
-        ToolResult::success("(no tasks)")
+        let records = tasks.list(status_filter).await;
+        let items: Vec<serde_json::Value> = records
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "type": r.task_type,
+                    "status": format!("{:?}", r.status).to_lowercase(),
+                    "description": r.description,
+                })
+            })
+            .collect();
+        ToolResult::success(serde_json::json!({ "tasks": items }).to_string())
     }
 }
 
@@ -60,10 +77,18 @@ impl crate::traits::Tool for TaskListTool {
 mod tests {
     use super::*;
     use crate::traits::Tool;
+    use oh_services::tasks::BackgroundTaskManager;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(PathBuf::from("/tmp"))
+    }
+
+    fn ctx_with_tasks() -> ToolExecutionContext {
+        let mut c = ctx();
+        c.tasks = Some(Arc::new(BackgroundTaskManager::new()));
+        c
     }
 
     #[test]
@@ -110,24 +135,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_success_with_task_manager() {
-        let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
         let result = TaskListTool
-            .execute(serde_json::json!({}), &context)
+            .execute(serde_json::json!({}), &ctx_with_tasks())
             .await;
         assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert!(v["tasks"].is_array());
     }
 
     #[tokio::test]
     async fn test_valid_status_filter() {
-        let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
         let result = TaskListTool
-            .execute(serde_json::json!({"status": "running"}), &context)
+            .execute(serde_json::json!({"status": "running"}), &ctx_with_tasks())
             .await;
         assert!(!result.is_error);
     }

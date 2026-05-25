@@ -65,18 +65,27 @@ impl crate::traits::Tool for TaskCreateTool {
             );
         }
 
-        if context.metadata.get("task_manager").is_none() {
-            return ToolResult::error("Task manager not available");
-        }
+        let tasks = match context.tasks.as_ref() {
+            Some(t) => t,
+            None => return ToolResult::error("Task manager not available"),
+        };
 
-        // The actual task creation is wired at the CLI level; this is a placeholder.
-        let task_type = if command.is_some() { "local_bash" } else { "local_agent" };
+        let cwd = context.cwd.to_string_lossy().to_string();
+        let record = if let Some(cmd) = command {
+            tasks.create_shell(cmd, description, &cwd).await
+        } else {
+            // prompt.is_some() guaranteed by the checks above.
+            tasks
+                .create_agent(prompt.unwrap_or_default(), description, &cwd)
+                .await
+        };
+
         ToolResult::success(
             serde_json::json!({
-                "id": "pending",
-                "status": "pending",
-                "type": task_type,
-                "description": description
+                "id": record.id,
+                "status": format!("{:?}", record.status).to_lowercase(),
+                "type": record.task_type,
+                "description": record.description,
             })
             .to_string(),
         )
@@ -87,10 +96,18 @@ impl crate::traits::Tool for TaskCreateTool {
 mod tests {
     use super::*;
     use crate::traits::Tool;
+    use oh_services::tasks::BackgroundTaskManager;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(PathBuf::from("/tmp"))
+    }
+
+    fn ctx_with_tasks() -> ToolExecutionContext {
+        let mut c = ctx();
+        c.tasks = Some(Arc::new(BackgroundTaskManager::new()));
+        c
     }
 
     #[test]
@@ -166,17 +183,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_success_with_task_manager() {
-        let mut context = ctx();
-        context
-            .metadata
-            .insert("task_manager".to_string(), serde_json::json!(true));
+        let context = ctx_with_tasks();
         let result = TaskCreateTool
             .execute(
-                serde_json::json!({"description": "run tests", "command": "cargo test"}),
+                serde_json::json!({"description": "run tests", "command": "echo hi"}),
                 &context,
             )
             .await;
-        assert!(!result.is_error);
-        assert!(result.output.contains("local_bash"));
+        assert!(!result.is_error, "output: {}", result.output);
+        let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(v["type"], "local_bash");
+        assert!(v["id"].as_str().unwrap().len() > 8);
     }
 }

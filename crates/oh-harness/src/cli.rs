@@ -240,7 +240,16 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut tool_registry = create_default_tool_registry();
     // Replace the default empty SkillTool with our populated one
     tool_registry.register(Box::new(skill_tool));
+    // Capture the parent's tool universe for subagent tool-policy intersection.
+    let tool_universe = tool_registry.tool_names();
     let tool_registry = Arc::new(tool_registry);
+
+    // Clone the pieces the subagent runner needs before they are moved into the
+    // engine constructor below.
+    let runner_api_client = api_client.clone();
+    let runner_permission_checker = permission_checker.clone();
+    let runner_cwd = cwd.clone();
+    let runner_system_prompt = system_prompt.clone();
 
     let system_prompt_copy = system_prompt.clone();
     let mut engine = QueryEngine::new(
@@ -265,6 +274,48 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Apply max_turns: CLI flag > settings.json > default (30)
     let max_turns = args.max_turns.unwrap_or(settings.max_turns);
     engine.set_max_turns(max_turns);
+
+    // ── Subagent orchestration wiring ──────────────────────────────────────
+    // Build the in-process control plane: a session store (for parent-linked
+    // child trajectories), a background-task manager, an engine-bound runner,
+    // and the SubagentManager that ties them together. Inject the two trait
+    // objects (SubagentSpawner / BackgroundTasks) into the engine so the
+    // `Agent` and `Task*` tools can reach them from inside the query loop.
+    let session_store: Option<Arc<oh_services::sessions::SessionStore>> =
+        match oh_services::sessions::SessionStore::with_default_backend().await {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                tracing::warn!("subagent: session store unavailable, trajectories disabled: {e}");
+                None
+            }
+        };
+
+    let task_manager = Arc::new(oh_services::tasks::BackgroundTaskManager::new());
+
+    let runner = Arc::new(crate::subagent_runner::EngineSubagentRunner::new(
+        runner_api_client,
+        runner_permission_checker,
+        Some(hook_executor.clone()),
+        session_store.clone(),
+        oh_types::subagent::AgentId::new("main"),
+        None,
+        runner_cwd,
+        settings.model.clone(),
+        runner_system_prompt,
+        settings.max_tokens,
+        max_turns,
+    ));
+
+    let subagent_manager = Arc::new(
+        oh_services::subagent::SubagentManager::new(
+            Arc::clone(&task_manager),
+            ".".to_string(),
+        )
+        .with_runner(runner, tool_universe),
+    );
+
+    engine.set_subagents(subagent_manager);
+    engine.set_tasks(task_manager);
 
     // Fire SessionStart hook
     hook_executor

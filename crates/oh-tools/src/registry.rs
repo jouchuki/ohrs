@@ -31,6 +31,12 @@ impl ToolRegistry {
         self.tools.values().map(|t| t.as_ref()).collect()
     }
 
+    /// Return all registered tool names (the parent's tool universe, used to
+    /// resolve a subagent's tool policy into a concrete allow-list).
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
     /// Drop every tool whose name does not satisfy `keep`.
     ///
     /// Used to scope a registry down to an agent definition's tool policy
@@ -140,6 +146,16 @@ mod tests {
         registry.retain(|name| name == "keep");
         let names: Vec<&str> = registry.list_tools().iter().map(|t| t.name()).collect();
         assert_eq!(names, vec!["keep"]);
+    }
+
+    #[test]
+    fn test_tool_names_returns_all() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeTool { tool_name: "a" }));
+        registry.register(Box::new(FakeTool { tool_name: "b" }));
+        let mut names = registry.tool_names();
+        names.sort();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
