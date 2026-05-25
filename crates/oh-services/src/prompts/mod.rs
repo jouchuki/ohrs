@@ -22,7 +22,12 @@ pub struct PromptBuilder<'a> {
 
 impl<'a> PromptBuilder<'a> {
     pub fn new(cwd: &'a Path) -> Self {
-        Self { cwd, override_prompt: None, append_prompt: None, bare: false }
+        Self {
+            cwd,
+            override_prompt: None,
+            append_prompt: None,
+            bare: false,
+        }
     }
 
     /// If `override_prompt` is Some, `build()` returns it verbatim (skips all layers).
@@ -74,7 +79,10 @@ mod tests {
         let dir = tmpdir();
         fs::write(dir.path().join("CLAUDE.md"), "# Rules\n- be terse\n").unwrap();
         let prompt = PromptBuilder::new(dir.path()).build();
-        assert!(prompt.contains("be terse"), "expected CLAUDE.md rule in prompt");
+        assert!(
+            prompt.contains("be terse"),
+            "expected CLAUDE.md rule in prompt"
+        );
     }
 
     #[test]
@@ -82,7 +90,10 @@ mod tests {
         let dir = tmpdir();
         // No CLAUDE.md written — should still produce base + env without panic.
         let prompt = PromptBuilder::new(dir.path()).build();
-        assert!(prompt.contains("# Environment"), "expected environment section");
+        assert!(
+            prompt.contains("# Environment"),
+            "expected environment section"
+        );
         assert!(prompt.contains("ohrs"), "expected base template mention");
     }
 
@@ -94,7 +105,10 @@ mod tests {
         let prompt = PromptBuilder::new(dir.path()).build();
         assert!(prompt.contains("some rule here"), "body should be included");
         // Frontmatter key should not appear verbatim in prompt output
-        assert!(!prompt.contains("priority: high"), "frontmatter should be stripped");
+        assert!(
+            !prompt.contains("priority: high"),
+            "frontmatter should be stripped"
+        );
     }
 
     #[test]
@@ -112,7 +126,13 @@ mod tests {
         fs::write(dir.path().join("CLAUDE.md"), "# Rules\n- do not appear\n").unwrap();
         // bare = true must suppress CLAUDE.md injection
         let prompt = PromptBuilder::new(dir.path()).bare(true).build();
-        assert!(!prompt.contains("do not appear"), "bare mode must skip CLAUDE.md");
-        assert!(prompt.contains("# Environment"), "base + env still expected in bare mode");
+        assert!(
+            !prompt.contains("do not appear"),
+            "bare mode must skip CLAUDE.md"
+        );
+        assert!(
+            prompt.contains("# Environment"),
+            "base + env still expected in bare mode"
+        );
     }
 }

@@ -69,9 +69,7 @@ impl crate::traits::Tool for ToolSearchTool {
             .filter_map(|tool| {
                 let name = tool.get("name")?.as_str()?;
                 let desc = tool.get("description")?.as_str()?;
-                if name.to_lowercase().contains(&query)
-                    || desc.to_lowercase().contains(&query)
-                {
+                if name.to_lowercase().contains(&query) || desc.to_lowercase().contains(&query) {
                     Some((name.to_string(), desc.to_string()))
                 } else {
                     None
@@ -120,7 +118,9 @@ mod tests {
     async fn test_search_finds_matching_tools() {
         let tool = ToolSearchTool;
         let ctx = ctx_with_registry();
-        let result = tool.execute(serde_json::json!({"query": "file"}), &ctx).await;
+        let result = tool
+            .execute(serde_json::json!({"query": "file"}), &ctx)
+            .await;
         assert!(!result.is_error);
         assert!(result.output.contains("FileRead"));
         assert!(result.output.contains("FileWrite"));
@@ -141,7 +141,9 @@ mod tests {
     async fn test_search_missing_registry() {
         let tool = ToolSearchTool;
         let ctx = ToolExecutionContext::new(PathBuf::from("/tmp"));
-        let result = tool.execute(serde_json::json!({"query": "bash"}), &ctx).await;
+        let result = tool
+            .execute(serde_json::json!({"query": "bash"}), &ctx)
+            .await;
         assert!(result.is_error);
     }
 

@@ -98,6 +98,7 @@ impl crate::traits::Tool for CronCreateTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // ENV_TEST_LOCK is intentionally held across .await to serialize env-mutating tests
 mod tests {
     use super::*;
     use crate::traits::Tool;
@@ -105,7 +106,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cron_create_success() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let cron_path = dir.path().join("cron_jobs.json");
         unsafe {
@@ -127,7 +130,8 @@ mod tests {
         assert!(result.output.starts_with("Created cron job: "));
 
         // Verify file was written
-        let jobs: Vec<CronJob> = serde_json::from_str(&std::fs::read_to_string(&cron_path).unwrap()).unwrap();
+        let jobs: Vec<CronJob> =
+            serde_json::from_str(&std::fs::read_to_string(&cron_path).unwrap()).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].schedule, "* * * * *");
         assert_eq!(jobs[0].command, "echo hello");

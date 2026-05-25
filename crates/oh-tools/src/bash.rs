@@ -87,9 +87,7 @@ impl crate::traits::Tool for BashTool {
                 }
             }
             Ok(Err(e)) => ToolResult::error(format!("Failed to execute command: {e}")),
-            Err(_) => ToolResult::error(format!(
-                "Command timed out after {timeout_ms}ms"
-            )),
+            Err(_) => ToolResult::error(format!("Command timed out after {timeout_ms}ms")),
         }
     }
 }
@@ -135,7 +133,8 @@ mod tests {
         // The resolved path may differ due to symlinks, so use canonical comparison
         let expected = std::fs::canonicalize(dir.path()).unwrap();
         let actual_trimmed = result.output.trim();
-        let actual = std::fs::canonicalize(actual_trimmed).unwrap_or_else(|_| actual_trimmed.into());
+        let actual =
+            std::fs::canonicalize(actual_trimmed).unwrap_or_else(|_| actual_trimmed.into());
         assert_eq!(actual, expected);
     }
 

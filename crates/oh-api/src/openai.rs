@@ -9,9 +9,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures::Stream;
 use oh_types::api::*;
-use oh_types::messages::{
-    ContentBlock, ConversationMessage, Role, TextBlock, ToolUseBlock,
-};
+use oh_types::messages::{ContentBlock, ConversationMessage, Role, TextBlock, ToolUseBlock};
 use opentelemetry::KeyValue;
 use tracing::{info_span, warn, Instrument};
 
@@ -70,11 +68,8 @@ impl OpenAiApiClient {
 
             // Convert tools from Anthropic format to OpenAI function-calling format
             if !request.tools.is_empty() {
-                let oai_tools: Vec<serde_json::Value> = request
-                    .tools
-                    .iter()
-                    .map(convert_tool_to_openai)
-                    .collect();
+                let oai_tools: Vec<serde_json::Value> =
+                    request.tools.iter().map(convert_tool_to_openai).collect();
                 body["tools"] = serde_json::json!(oai_tools);
             }
 
@@ -145,10 +140,8 @@ impl StreamingApiClient for OpenAiApiClient {
     async fn stream_message(
         &self,
         request: ApiMessageRequest,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
-        ApiError,
-    > {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>, ApiError>
+    {
         let mut last_error: Option<ApiError> = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -190,10 +183,7 @@ impl StreamingApiClient for OpenAiApiClient {
 ///
 /// Anthropic packs tool results as content blocks inside a user message.
 /// OpenAI expects separate `{ role: "tool", tool_call_id, content }` messages.
-fn convert_message_to_openai(
-    msg: &ConversationMessage,
-    out: &mut Vec<serde_json::Value>,
-) {
+fn convert_message_to_openai(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) {
     match msg.role {
         Role::User => {
             // Separate text blocks from tool-result blocks.
@@ -280,7 +270,10 @@ fn convert_tool_to_openai(tool: &serde_json::Value) -> serde_json::Value {
     }
 
     let name = tool.get("name").cloned().unwrap_or(serde_json::json!(""));
-    let description = tool.get("description").cloned().unwrap_or(serde_json::json!(""));
+    let description = tool
+        .get("description")
+        .cloned()
+        .unwrap_or(serde_json::json!(""));
     let parameters = tool
         .get("input_schema")
         .cloned()
@@ -658,7 +651,10 @@ mod tests {
         let converted = convert_tool_to_openai(&tool);
         assert_eq!(converted["type"], "function");
         assert_eq!(converted["function"]["name"], "read_file");
-        assert_eq!(converted["function"]["description"], "Read a file from disk");
+        assert_eq!(
+            converted["function"]["description"],
+            "Read a file from disk"
+        );
         assert_eq!(converted["function"]["parameters"]["type"], "object");
         assert!(converted["function"]["parameters"]["properties"]["path"].is_object());
     }

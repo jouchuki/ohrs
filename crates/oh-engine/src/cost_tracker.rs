@@ -44,7 +44,9 @@ mod tests {
         let mut tracker = CostTracker::new();
         let usage = UsageSnapshot {
             input_tokens: 100,
-            output_tokens: 50, ..Default::default() };
+            output_tokens: 50,
+            ..Default::default()
+        };
         tracker.add(&usage);
         assert_eq!(tracker.total_input_tokens, 100);
         assert_eq!(tracker.total_output_tokens, 50);
@@ -56,7 +58,9 @@ mod tests {
         let mut tracker = CostTracker::new();
         tracker.add(&UsageSnapshot {
             input_tokens: 30,
-            output_tokens: 20, ..Default::default() });
+            output_tokens: 20,
+            ..Default::default()
+        });
         assert_eq!(tracker.total_tokens(), 50);
     }
 
@@ -65,13 +69,19 @@ mod tests {
         let mut tracker = CostTracker::new();
         tracker.add(&UsageSnapshot {
             input_tokens: 10,
-            output_tokens: 5, ..Default::default() });
+            output_tokens: 5,
+            ..Default::default()
+        });
         tracker.add(&UsageSnapshot {
             input_tokens: 20,
-            output_tokens: 15, ..Default::default() });
+            output_tokens: 15,
+            ..Default::default()
+        });
         tracker.add(&UsageSnapshot {
             input_tokens: 30,
-            output_tokens: 25, ..Default::default() });
+            output_tokens: 25,
+            ..Default::default()
+        });
         assert_eq!(tracker.total_input_tokens, 60);
         assert_eq!(tracker.total_output_tokens, 45);
         assert_eq!(tracker.turns, 3);

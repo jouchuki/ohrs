@@ -49,10 +49,7 @@ impl crate::traits::Tool for FileWriteTool {
 
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                return ToolResult::error(format!(
-                    "Failed to create directories: {}",
-                    e
-                ));
+                return ToolResult::error(format!("Failed to create directories: {}", e));
             }
         }
 

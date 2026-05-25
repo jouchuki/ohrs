@@ -16,11 +16,11 @@ pub fn load_static_plugin(
     let manifest_path = crate::discovery::find_manifest(path)
         .ok_or_else(|| PluginLoadError::NoManifest(path.display().to_string()))?;
 
-    let manifest_text = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| PluginLoadError::Io(e.to_string()))?;
+    let manifest_text =
+        std::fs::read_to_string(&manifest_path).map_err(|e| PluginLoadError::Io(e.to_string()))?;
 
-    let manifest: PluginManifest = serde_json::from_str(&manifest_text)
-        .map_err(|e| PluginLoadError::Parse(e.to_string()))?;
+    let manifest: PluginManifest =
+        serde_json::from_str(&manifest_text).map_err(|e| PluginLoadError::Parse(e.to_string()))?;
 
     let enabled = enabled_plugins
         .get(&manifest.name)
@@ -382,7 +382,10 @@ mod tests {
         let enabled: HashMap<String, bool> = HashMap::new();
         let result = load_static_plugin(&plugin_dir, &enabled);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PluginLoadError::NoManifest(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            PluginLoadError::NoManifest(_)
+        ));
     }
 
     #[test]

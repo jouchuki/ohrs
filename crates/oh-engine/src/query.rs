@@ -19,12 +19,18 @@ use opentelemetry::KeyValue;
 use tracing::{info_span, Instrument};
 
 /// Callback type for permission prompts.
-pub type PermissionPromptFn =
-    Arc<dyn Fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync>;
+pub type PermissionPromptFn = Arc<
+    dyn Fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Callback type for asking the user.
-pub type AskUserPromptFn =
-    Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>> + Send + Sync>;
+pub type AskUserPromptFn = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Context shared across a query run.
 pub struct QueryContext {
@@ -441,10 +447,7 @@ async fn execute_tool_call(
     );
 
     if result.is_error {
-        oh_telemetry::TOOL_ERROR_COUNT.add(
-            1,
-            &[KeyValue::new("tool_name", tool_name.to_string())],
-        );
+        oh_telemetry::TOOL_ERROR_COUNT.add(1, &[KeyValue::new("tool_name", tool_name.to_string())]);
     }
 
     result
@@ -461,20 +464,24 @@ async fn apply_hook_action(context: &QueryContext, action: &serde_json::Value) {
                 action.get("hook"),
             ) {
                 if let (Ok(_event), Ok(hook)) = (
-                    serde_json::from_value::<HookEvent>(serde_json::Value::String(event_str.to_string())),
+                    serde_json::from_value::<HookEvent>(serde_json::Value::String(
+                        event_str.to_string(),
+                    )),
                     serde_json::from_value::<oh_types::hooks::HookDefinition>(hook_value.clone()),
                 ) {
                     if let Some(ref executor) = context.hook_executor {
                         // Access the registry via the executor's public handle
                         // For now, fire a hook to signal the addition
-                        executor.execute(
-                            HookEvent::PluginLoaded,
-                            serde_json::json!({
-                                "source": "hook_manage",
-                                "event": event_str,
-                                "hook_type": hook.hook_type(),
-                            }),
-                        ).await;
+                        executor
+                            .execute(
+                                HookEvent::PluginLoaded,
+                                serde_json::json!({
+                                    "source": "hook_manage",
+                                    "event": event_str,
+                                    "hook_type": hook.hook_type(),
+                                }),
+                            )
+                            .await;
                     }
                     tracing::info!(event = %event_str, hook_type = hook.hook_type(), "Hook registered via HookManage tool");
                 }
@@ -551,11 +558,13 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text(TextBlock::new(self.text.clone()))],
             };
-            let events = vec![Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
-                message: msg,
-                usage: UsageSnapshot::default(),
-                stop_reason: Some("end_turn".into()),
-            }))];
+            let events = vec![Ok(ApiStreamEvent::MessageComplete(
+                ApiMessageCompleteEvent {
+                    message: msg,
+                    usage: UsageSnapshot::default(),
+                    stop_reason: Some("end_turn".into()),
+                },
+            ))];
             Ok(Box::pin(futures::stream::iter(events)))
         }
     }
@@ -670,11 +679,13 @@ mod tests {
                     content: vec![ContentBlock::Text(TextBlock::new(self.final_text.clone()))],
                 }
             };
-            let events = vec![Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
-                message: msg,
-                usage: UsageSnapshot::default(),
-                stop_reason: Some("end_turn".into()),
-            }))];
+            let events = vec![Ok(ApiStreamEvent::MessageComplete(
+                ApiMessageCompleteEvent {
+                    message: msg,
+                    usage: UsageSnapshot::default(),
+                    stop_reason: Some("end_turn".into()),
+                },
+            ))];
             Ok(Box::pin(futures::stream::iter(events)))
         }
     }
@@ -805,11 +816,17 @@ mod tests {
 
         let seen = events.lock().unwrap();
         assert!(
-            seen.iter().filter(|e| **e == HookEvent::SubagentStart).count() == 1,
+            seen.iter()
+                .filter(|e| **e == HookEvent::SubagentStart)
+                .count()
+                == 1,
             "webhook should be invoked once on SubagentStart: {seen:?}"
         );
         assert!(
-            seen.iter().filter(|e| **e == HookEvent::SubagentStop).count() == 1,
+            seen.iter()
+                .filter(|e| **e == HookEvent::SubagentStop)
+                .count()
+                == 1,
             "webhook should be invoked once on SubagentStop: {seen:?}"
         );
     }

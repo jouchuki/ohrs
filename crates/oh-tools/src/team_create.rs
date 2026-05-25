@@ -65,9 +65,7 @@ mod tests {
         let tool = TeamCreateTool;
         let ctx = ToolExecutionContext::new(PathBuf::from("/tmp"));
         let name = format!("test_team_create_{}", uuid::Uuid::new_v4());
-        let result = tool
-            .execute(serde_json::json!({"name": name}), &ctx)
-            .await;
+        let result = tool.execute(serde_json::json!({"name": name}), &ctx).await;
         assert!(!result.is_error, "Expected success, got: {}", result.output);
         assert_eq!(result.output, format!("Created team: {name}"));
 
@@ -83,15 +81,11 @@ mod tests {
         let name = format!("test_team_dup_{}", uuid::Uuid::new_v4());
 
         // Create first
-        let r1 = tool
-            .execute(serde_json::json!({"name": name}), &ctx)
-            .await;
+        let r1 = tool.execute(serde_json::json!({"name": name}), &ctx).await;
         assert!(!r1.is_error);
 
         // Duplicate should fail
-        let r2 = tool
-            .execute(serde_json::json!({"name": name}), &ctx)
-            .await;
+        let r2 = tool.execute(serde_json::json!({"name": name}), &ctx).await;
         assert!(r2.is_error);
 
         // Clean up

@@ -146,7 +146,10 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(OpenAiApiClient::new(&api_key, settings.base_url.as_deref()))
     } else {
         tracing::info!(provider = "anthropic", model = %settings.model, "Using Anthropic provider");
-        Arc::new(AnthropicApiClient::new(&api_key, settings.base_url.as_deref()))
+        Arc::new(AnthropicApiClient::new(
+            &api_key,
+            settings.base_url.as_deref(),
+        ))
     };
 
     // Create permission checker — apply CLI override for permission mode
@@ -155,7 +158,9 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         perm_settings.mode = oh_types::permissions::PermissionMode::FullAuto;
     } else if let Some(ref mode) = args.permission_mode {
         match mode.as_str() {
-            "full_auto" | "auto" => perm_settings.mode = oh_types::permissions::PermissionMode::FullAuto,
+            "full_auto" | "auto" => {
+                perm_settings.mode = oh_types::permissions::PermissionMode::FullAuto
+            }
             "plan" => perm_settings.mode = oh_types::permissions::PermissionMode::Plan,
             _ => {} // keep default
         }
@@ -179,7 +184,10 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let p = td.path().to_path_buf();
         (p, Some(td))
     } else {
-        (std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), None)
+        (
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            None,
+        )
     };
     // Make subprocesses + relative-path tools inherit it.
     std::env::set_current_dir(&cwd).ok();
@@ -234,7 +242,10 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let skill_tool = oh_tools::skill::SkillTool::new();
     if !skill_entries.is_empty() {
         skill_tool.set_available_skills(skill_entries.clone());
-        tracing::info!("Registered {} plugin skills into Skill tool schema", skill_entries.len());
+        tracing::info!(
+            "Registered {} plugin skills into Skill tool schema",
+            skill_entries.len()
+        );
     }
 
     let mut tool_registry = create_default_tool_registry();
@@ -307,11 +318,8 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let subagent_manager = Arc::new(
-        oh_services::subagent::SubagentManager::new(
-            Arc::clone(&task_manager),
-            ".".to_string(),
-        )
-        .with_runner(runner, tool_universe),
+        oh_services::subagent::SubagentManager::new(Arc::clone(&task_manager), ".".to_string())
+            .with_runner(runner, tool_universe),
     );
 
     engine.set_subagents(subagent_manager);
@@ -370,7 +378,13 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Interactive TUI mode
     let perm_mode_display = format!("{}", settings.permission.mode);
-    crate::ui::app::run_tui(engine, hook_executor, settings.model.clone(), perm_mode_display).await?;
+    crate::ui::app::run_tui(
+        engine,
+        hook_executor,
+        settings.model.clone(),
+        perm_mode_display,
+    )
+    .await?;
 
     Ok(())
 }
@@ -397,18 +411,21 @@ fn save_trajectory(
     user_message: &str,
     model: &str,
     tool_schemas: &[serde_json::Value],
-    events: &[(oh_types::stream_events::StreamEvent, Option<oh_types::api::UsageSnapshot>)],
+    events: &[(
+        oh_types::stream_events::StreamEvent,
+        Option<oh_types::api::UsageSnapshot>,
+    )],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
-    use oh_types::stream_events::StreamEvent;
     use oh_types::messages::ContentBlock;
+    use oh_types::stream_events::StreamEvent;
+    use std::io::Write;
 
     let file = std::fs::File::create(path)?;
     let mut writer = std::io::BufWriter::new(file);
     let start = std::time::Instant::now();
 
     let writeln_json = |writer: &mut std::io::BufWriter<std::fs::File>,
-                            entry: serde_json::Value|
+                        entry: serde_json::Value|
      -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_writer(&mut *writer, &entry)?;
         writeln!(writer)?;
@@ -416,37 +433,48 @@ fn save_trajectory(
     };
 
     // ── System prompt ──
-    writeln_json(&mut writer, serde_json::json!({
-        "role": "system",
-        "content": system_prompt,
-        "_meta": {
-            "model": model,
-            "timestamp": chrono_now(),
-            "tools": tool_schemas,
-        }
-    }))?;
+    writeln_json(
+        &mut writer,
+        serde_json::json!({
+            "role": "system",
+            "content": system_prompt,
+            "_meta": {
+                "model": model,
+                "timestamp": chrono_now(),
+                "tools": tool_schemas,
+            }
+        }),
+    )?;
 
     // ── User message ──
-    writeln_json(&mut writer, serde_json::json!({
-        "role": "user",
-        "content": user_message,
-    }))?;
+    writeln_json(
+        &mut writer,
+        serde_json::json!({
+            "role": "user",
+            "content": user_message,
+        }),
+    )?;
 
     // ── Agent turns ──
     // Track pending tool_call_ids so we can pair ToolExecutionCompleted
     // with the correct call (supports parallel tool calls).
-    let mut pending_tool_ids: std::collections::VecDeque<(String, String)> = std::collections::VecDeque::new();
+    let mut pending_tool_ids: std::collections::VecDeque<(String, String)> =
+        std::collections::VecDeque::new();
 
     for (event, usage) in events {
         match event {
             StreamEvent::AssistantTurnComplete(tc) => {
                 // Build content string from text blocks
-                let content: String = tc.message.content.iter().filter_map(|b| {
-                    match b {
+                let content: String = tc
+                    .message
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
                         ContentBlock::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
                         _ => None,
-                    }
-                }).collect::<Vec<_>>().join("");
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
 
                 // Build tool_calls array in OpenAI fine-tuning format
                 let tool_calls: Vec<serde_json::Value> = tc.message.content.iter().filter_map(|b| {
@@ -493,22 +521,26 @@ fn save_trajectory(
 
             StreamEvent::ToolExecutionCompleted(tc) => {
                 // Pop the matching tool_call_id from the queue
-                let tool_call_id = pending_tool_ids.iter()
+                let tool_call_id = pending_tool_ids
+                    .iter()
                     .position(|(name, _)| name == &tc.tool_name)
                     .and_then(|i| pending_tool_ids.remove(i))
                     .map(|(_, id)| id)
                     .unwrap_or_default();
 
-                writeln_json(&mut writer, serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": tc.tool_name,
-                    "content": tc.output,
-                    "_meta": {
-                        "is_error": tc.is_error,
-                        "_t_ms": start.elapsed().as_millis() as u64,
-                    }
-                }))?;
+                writeln_json(
+                    &mut writer,
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tc.tool_name,
+                        "content": tc.output,
+                        "_meta": {
+                            "is_error": tc.is_error,
+                            "_t_ms": start.elapsed().as_millis() as u64,
+                        }
+                    }),
+                )?;
             }
 
             // Text deltas and tool starts are intermediate signals —

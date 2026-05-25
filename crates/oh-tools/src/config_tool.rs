@@ -88,9 +88,7 @@ impl crate::traits::Tool for ConfigTool {
 
                 ToolResult::success(format!("Updated config: {key} = {value}"))
             }
-            other => ToolResult::error(format!(
-                "Unknown action: {other}. Use 'get' or 'set'."
-            )),
+            other => ToolResult::error(format!("Unknown action: {other}. Use 'get' or 'set'.")),
         }
     }
 }
@@ -106,7 +104,9 @@ mod tests {
     async fn test_config_get_empty() {
         let tool = ConfigTool;
         let ctx = ToolExecutionContext::new(PathBuf::from("/tmp"));
-        let result = tool.execute(serde_json::json!({"action": "get"}), &ctx).await;
+        let result = tool
+            .execute(serde_json::json!({"action": "get"}), &ctx)
+            .await;
         assert!(!result.is_error);
         assert_eq!(result.output, "{}");
     }
@@ -119,7 +119,9 @@ mod tests {
             "config".to_string(),
             serde_json::json!({"model": "claude-3", "temperature": 0.7}),
         );
-        let result = tool.execute(serde_json::json!({"action": "get"}), &ctx).await;
+        let result = tool
+            .execute(serde_json::json!({"action": "get"}), &ctx)
+            .await;
         assert!(!result.is_error);
         assert!(result.output.contains("model"));
         assert!(result.output.contains("claude-3"));

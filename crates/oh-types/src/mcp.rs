@@ -180,7 +180,12 @@ mod tests {
 
     #[test]
     fn test_mcp_connection_state_serde_roundtrip() {
-        for state in [McpConnectionState::Connected, McpConnectionState::Failed, McpConnectionState::Pending, McpConnectionState::Disabled] {
+        for state in [
+            McpConnectionState::Connected,
+            McpConnectionState::Failed,
+            McpConnectionState::Pending,
+            McpConnectionState::Disabled,
+        ] {
             let json = serde_json::to_string(&state).unwrap();
             let deser: McpConnectionState = serde_json::from_str(&json).unwrap();
             assert_eq!(deser, state);
@@ -189,7 +194,13 @@ mod tests {
 
     #[test]
     fn test_mcp_connection_state_serde_values() {
-        assert_eq!(serde_json::to_string(&McpConnectionState::Connected).unwrap(), "\"connected\"");
-        assert_eq!(serde_json::to_string(&McpConnectionState::Failed).unwrap(), "\"failed\"");
+        assert_eq!(
+            serde_json::to_string(&McpConnectionState::Connected).unwrap(),
+            "\"connected\""
+        );
+        assert_eq!(
+            serde_json::to_string(&McpConnectionState::Failed).unwrap(),
+            "\"failed\""
+        );
     }
 }

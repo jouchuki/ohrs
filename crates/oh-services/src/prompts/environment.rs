@@ -46,7 +46,11 @@ fn detect_git_info(cwd: &Path) -> (bool, Option<String>) {
         .filter(|o| o.status.success())
         .and_then(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         });
     (true, branch)
 }
@@ -60,7 +64,11 @@ fn detect_rust_version() -> String {
         .filter(|o| o.status.success())
         .and_then(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         })
         .unwrap_or_else(|| "unknown".into())
 }
@@ -117,7 +125,11 @@ fn chrono_or_fallback() -> String {
         .filter(|o| o.status.success())
         .and_then(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         })
         .unwrap_or_else(|| "unknown".into())
 }

@@ -44,10 +44,9 @@ impl crate::traits::Tool for ExitWorktreeTool {
                 if out.status.success() {
                     let mut result =
                         ToolResult::success(format!("Removed worktree at {}", worktree_path));
-                    result.metadata.insert(
-                        "worktree_path".to_string(),
-                        serde_json::Value::Null,
-                    );
+                    result
+                        .metadata
+                        .insert("worktree_path".to_string(), serde_json::Value::Null);
                     result
                 } else {
                     let stderr = String::from_utf8_lossy(&out.stderr);

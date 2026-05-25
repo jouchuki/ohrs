@@ -21,7 +21,11 @@ async fn mailbox_send_recv_roundtrip() {
     let msg = make_msg("bob", "alice", "hello");
     mb.send(&msg).await.unwrap();
 
-    let got = mb.recv_one().await.unwrap().expect("message should be present");
+    let got = mb
+        .recv_one()
+        .await
+        .unwrap()
+        .expect("message should be present");
     assert_eq!(got.body, serde_json::json!({ "text": "hello" }));
 
     // Inbox should now be empty.

@@ -109,10 +109,7 @@ impl Backend for InProcessBackend {
 
         self.tasks.insert(id.clone(), entry);
 
-        Ok(TeammateHandle {
-            id,
-            cancel,
-        })
+        Ok(TeammateHandle { id, cancel })
     }
 
     async fn kill(&self, id: &TeammateId, graceful: bool) -> Result<(), SwarmError> {

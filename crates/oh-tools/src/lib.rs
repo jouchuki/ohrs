@@ -2,54 +2,54 @@
 //!
 //! Provides 43+ tools: bash, file I/O, search, web, MCP, tasks, etc.
 
-pub mod traits;
 pub mod registry;
+pub mod traits;
 
 // Tool implementations
-pub mod bash;
-pub mod file_read;
-pub mod file_write;
-pub mod file_edit;
-pub mod glob_tool;
-pub mod grep;
-pub mod web_fetch;
-pub mod web_search;
 pub mod agent;
 pub mod ask_user_question;
-pub mod send_message;
-pub mod teammate_message;
-pub mod skill;
-pub mod tool_search;
-pub mod sleep;
-pub mod notebook_edit;
-pub mod todo_write;
-pub mod config_tool;
+pub mod bash;
 pub mod brief;
-pub mod enter_plan_mode;
-pub mod exit_plan_mode;
-pub mod enter_worktree;
-pub mod exit_worktree;
+pub mod config_tool;
 pub mod cron_create;
-pub mod cron_list;
 pub mod cron_delete;
+pub mod cron_list;
+pub mod enter_plan_mode;
+pub mod enter_worktree;
+pub mod exit_plan_mode;
+pub mod exit_worktree;
+pub mod file_edit;
+pub mod file_read;
+pub mod file_write;
+pub mod glob_tool;
+pub mod grep;
+pub mod hook_manage;
+pub mod list_mcp_resources;
+pub mod lsp;
+pub mod mcp_auth;
+pub mod mcp_tool;
+pub mod notebook_edit;
+pub mod read_mcp_resource;
 pub mod remote_trigger;
+pub mod send_message;
+pub mod skill;
+pub mod sleep;
 pub mod task_create;
 pub mod task_get;
 pub mod task_list;
-pub mod task_update;
-pub mod task_stop;
 pub mod task_output;
+pub mod task_stop;
+pub mod task_update;
 pub mod team_create;
 pub mod team_delete;
-pub mod mcp_tool;
-pub mod mcp_auth;
-pub mod list_mcp_resources;
-pub mod read_mcp_resource;
-pub mod lsp;
-pub mod hook_manage;
+pub mod teammate_message;
+pub mod todo_write;
+pub mod tool_search;
+pub mod web_fetch;
+pub mod web_search;
 
-pub use traits::Tool;
 pub use registry::ToolRegistry;
+pub use traits::Tool;
 
 /// Serializes tests that mutate process-global environment variables.
 ///

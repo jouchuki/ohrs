@@ -17,7 +17,9 @@ pub fn discover(cwd: &Path) -> Vec<PathBuf> {
             current.join(".claude").join("CLAUDE.md"),
         ] {
             if candidate.exists() {
-                let canon = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+                let canon = candidate
+                    .canonicalize()
+                    .unwrap_or_else(|_| candidate.clone());
                 if seen.insert(canon.clone()) {
                     results.push(candidate.clone());
                 }

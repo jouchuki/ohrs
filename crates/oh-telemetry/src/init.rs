@@ -66,7 +66,9 @@ impl Drop for TelemetryGuard {
 ///
 /// All crates use `tracing` macros for spans and events. When mode is `Otlp`,
 /// spans are exported to an OTLP collector via `tracing-opentelemetry`.
-pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Box<dyn std::error::Error>> {
+pub fn init_telemetry(
+    config: TelemetryConfig,
+) -> Result<TelemetryGuard, Box<dyn std::error::Error>> {
     match config.mode {
         TelemetryMode::Off => {
             tracing_subscriber::registry()
@@ -83,15 +85,17 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Box<dyn
             //
             // For now, all spans/metrics are emitted via tracing and can be consumed
             // by any tracing subscriber layer (JSON, fmt, OTLP when versions align).
-            let env_filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"));
+            let env_filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
             if config.mode == TelemetryMode::Otlp {
                 // Set up OTLP tracer provider for metrics (even without the tracing bridge,
                 // the OTel metrics still export via the global meter provider).
-                let resource = opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new("service.name", config.service_name.clone()),
-                ]);
+                let resource =
+                    opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+                        "service.name",
+                        config.service_name.clone(),
+                    )]);
 
                 let endpoint = config
                     .otlp_endpoint

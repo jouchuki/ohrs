@@ -69,7 +69,9 @@ mod tests {
     async fn test_sleep_custom_duration() {
         let tool = SleepTool;
         let ctx = ToolExecutionContext::new(PathBuf::from("/tmp"));
-        let result = tool.execute(serde_json::json!({"seconds": 0.01}), &ctx).await;
+        let result = tool
+            .execute(serde_json::json!({"seconds": 0.01}), &ctx)
+            .await;
         assert!(!result.is_error);
         assert_eq!(result.output, "Slept for 0.01 seconds");
     }

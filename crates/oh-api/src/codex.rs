@@ -75,8 +75,8 @@ impl CodexApiClient {
             .map_err(|_| CodexError::MissingEnv("CODEX_ACCESS_TOKEN"))?;
         let refresh = std::env::var("CODEX_REFRESH_TOKEN")
             .map_err(|_| CodexError::MissingEnv("CODEX_REFRESH_TOKEN"))?;
-        let base_url = std::env::var("CODEX_BASE_URL")
-            .unwrap_or_else(|_| CHATGPT_BACKEND_URL.to_string());
+        let base_url =
+            std::env::var("CODEX_BASE_URL").unwrap_or_else(|_| CHATGPT_BACKEND_URL.to_string());
         let expires_at = jwt_expiry(&access);
         Ok(Self {
             http: reqwest::Client::new(),
@@ -136,10 +136,7 @@ impl CodexApiClient {
     }
 
     /// POST to the OAuth refresh endpoint, returning `(access, refresh)`.
-    async fn do_refresh(
-        &self,
-        refresh_token: &str,
-    ) -> Result<(String, Option<String>), String> {
+    async fn do_refresh(&self, refresh_token: &str) -> Result<(String, Option<String>), String> {
         let body = json!({
             "client_id": CLIENT_ID,
             "grant_type": "refresh_token",
@@ -284,7 +281,9 @@ impl CodexApiClient {
             )));
         }
 
-        let stream = resp.bytes_stream().map(|chunk| chunk.map_err(|e| e.to_string()));
+        let stream = resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
         parse_sse_stream(stream).await
     }
 }
@@ -294,10 +293,8 @@ impl StreamingApiClient for CodexApiClient {
     async fn stream_message(
         &self,
         request: ApiMessageRequest,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
-        ApiError,
-    > {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>, ApiError>
+    {
         let mut last_error: Option<ApiError> = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -483,9 +480,7 @@ struct PendingToolCall {
 /// - `ApiStreamEvent::TextDelta` for each `response.output_text.delta` event.
 /// - `ApiStreamEvent::ToolUseDelta` for each `response.function_call_arguments.delta` event.
 /// - `ApiStreamEvent::MessageComplete` once at the end with accumulated usage / stop_reason.
-async fn parse_sse_stream<S>(
-    stream: S,
-) -> Result<Vec<Result<ApiStreamEvent, ApiError>>, ApiError>
+async fn parse_sse_stream<S>(stream: S) -> Result<Vec<Result<ApiStreamEvent, ApiError>>, ApiError>
 where
     S: Stream<Item = Result<bytes::Bytes, String>> + Unpin,
 {
@@ -505,7 +500,12 @@ where
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let done = handle_event_incremental(&mut result, &mut events, event.event.as_str(), &parsed);
+                let done = handle_event_incremental(
+                    &mut result,
+                    &mut events,
+                    event.event.as_str(),
+                    &parsed,
+                );
                 if done {
                     break;
                 }
@@ -552,14 +552,16 @@ where
         }
     });
 
-    events.push(Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
-        message: ConversationMessage {
-            role: Role::Assistant,
-            content: blocks,
+    events.push(Ok(ApiStreamEvent::MessageComplete(
+        ApiMessageCompleteEvent {
+            message: ConversationMessage {
+                role: Role::Assistant,
+                content: blocks,
+            },
+            usage,
+            stop_reason,
         },
-        usage,
-        stop_reason,
-    })));
+    )));
 
     Ok(events)
 }
@@ -826,9 +828,7 @@ mod tests {
     }
 
     /// Helper: extract MessageComplete from the last event in the vec.
-    fn expect_complete(
-        events: &[Result<ApiStreamEvent, ApiError>],
-    ) -> &ApiMessageCompleteEvent {
+    fn expect_complete(events: &[Result<ApiStreamEvent, ApiError>]) -> &ApiMessageCompleteEvent {
         match events.last().unwrap() {
             Ok(ApiStreamEvent::MessageComplete(e)) => e,
             other => panic!("expected MessageComplete as last event, got {:?}", other),

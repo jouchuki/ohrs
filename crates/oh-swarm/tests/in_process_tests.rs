@@ -1,5 +1,5 @@
-use oh_swarm::{InProcessBackend, TeammateConfig, TeammateId};
 use oh_swarm::backend::Backend;
+use oh_swarm::{InProcessBackend, TeammateConfig, TeammateId};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -55,7 +55,10 @@ async fn kill_graceful_triggers_cancel() {
 
     // Give the task time to observe cancellation.
     sleep(Duration::from_millis(50)).await;
-    assert!(cancelled.load(Ordering::SeqCst), "CancellationToken should have propagated");
+    assert!(
+        cancelled.load(Ordering::SeqCst),
+        "CancellationToken should have propagated"
+    );
 }
 
 #[tokio::test]

@@ -52,9 +52,7 @@ impl crate::traits::Tool for TodoWriteTool {
         };
 
         let mut result = ToolResult::success("Todos have been modified successfully.");
-        result
-            .metadata
-            .insert("todos".to_string(), todos);
+        result.metadata.insert("todos".to_string(), todos);
         result
     }
 }

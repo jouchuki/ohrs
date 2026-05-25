@@ -6,9 +6,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures::Stream;
 use oh_types::api::*;
-use oh_types::messages::{
-    ContentBlock, ConversationMessage, Role, TextBlock, ToolUseBlock,
-};
+use oh_types::messages::{ContentBlock, ConversationMessage, Role, TextBlock, ToolUseBlock};
 use opentelemetry::KeyValue;
 use tracing::{info_span, warn, Instrument};
 
@@ -18,10 +16,7 @@ pub trait StreamingApiClient: Send + Sync {
     async fn stream_message(
         &self,
         request: ApiMessageRequest,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
-        ApiError,
-    >;
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>, ApiError>;
 }
 
 /// Thin wrapper around the Anthropic HTTP API with retry logic.
@@ -36,9 +31,7 @@ impl AnthropicApiClient {
         Self {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
-            base_url: base_url
-                .unwrap_or("https://api.anthropic.com")
-                .to_string(),
+            base_url: base_url.unwrap_or("https://api.anthropic.com").to_string(),
         }
     }
 
@@ -95,7 +88,10 @@ impl AnthropicApiClient {
             }
 
             // Parse SSE stream
-            let text = response.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| ApiError::Network(e.to_string()))?;
             let (message, usage, stop_reason) = parse_sse_response(&text)?;
 
             let elapsed = start.elapsed().as_secs_f64();
@@ -133,10 +129,8 @@ impl StreamingApiClient for AnthropicApiClient {
     async fn stream_message(
         &self,
         request: ApiMessageRequest,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
-        ApiError,
-    > {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>, ApiError>
+    {
         let mut last_error: Option<ApiError> = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -228,9 +222,9 @@ fn parse_sse_response(
                 if block["type"].as_str() == Some("tool_use") {
                     // Flush accumulated text
                     if !current_text.is_empty() {
-                        content_blocks.push(ContentBlock::Text(TextBlock::new(
-                            std::mem::take(&mut current_text),
-                        )));
+                        content_blocks.push(ContentBlock::Text(TextBlock::new(std::mem::take(
+                            &mut current_text,
+                        ))));
                     }
                     content_blocks.push(ContentBlock::ToolUse(ToolUseBlock {
                         r#type: "tool_use".into(),
@@ -271,9 +265,7 @@ fn parse_sse_response(
             "content_block_stop" => {
                 // Finalize any partial JSON in tool_use blocks
                 if let Some(ContentBlock::ToolUse(ref mut tu)) = content_blocks.last_mut() {
-                    if let Some(serde_json::Value::String(partial)) =
-                        tu.input.remove("__partial")
-                    {
+                    if let Some(serde_json::Value::String(partial)) = tu.input.remove("__partial") {
                         if let Ok(parsed) = serde_json::from_str::<
                             std::collections::HashMap<String, serde_json::Value>,
                         >(&partial)
@@ -295,7 +287,10 @@ fn parse_sse_response(
                     if let Some(v) = u.get("input_tokens").and_then(|v| v.as_u64()) {
                         usage.input_tokens = v;
                     }
-                    if let Some(v) = u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(v) = u
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
                         usage.cache_creation_input_tokens = v;
                     }
                     if let Some(v) = u.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
@@ -312,7 +307,10 @@ fn parse_sse_response(
                     if let Some(v) = u.get("output_tokens").and_then(|v| v.as_u64()) {
                         usage.output_tokens = v;
                     }
-                    if let Some(v) = u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(v) = u
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
                         usage.cache_creation_input_tokens = v;
                     }
                     if let Some(v) = u.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
@@ -466,12 +464,16 @@ data: [DONE]\n";
 
     #[test]
     fn test_is_retryable_request_with_retryable_status() {
-        assert!(is_retryable(&ApiError::Request("status 529: overloaded".into())));
+        assert!(is_retryable(&ApiError::Request(
+            "status 529: overloaded".into()
+        )));
     }
 
     #[test]
     fn test_is_retryable_request_with_non_retryable_status() {
-        assert!(!is_retryable(&ApiError::Request("status 400: bad request".into())));
+        assert!(!is_retryable(&ApiError::Request(
+            "status 400: bad request".into()
+        )));
     }
 
     // ── get_retry_delay ─────────────────────────────────────────────
@@ -495,7 +497,10 @@ data: [DONE]\n";
     fn test_get_retry_delay_capped_at_max() {
         // attempt 10 → 2^10 = 1024, capped at MAX_DELAY_SECS (30)
         let d = get_retry_delay(10);
-        assert!((MAX_DELAY_SECS..=MAX_DELAY_SECS * 1.25).contains(&d), "d = {d}");
+        assert!(
+            (MAX_DELAY_SECS..=MAX_DELAY_SECS * 1.25).contains(&d),
+            "d = {d}"
+        );
     }
 
     // ── AnthropicApiClient::new ─────────────────────────────────────

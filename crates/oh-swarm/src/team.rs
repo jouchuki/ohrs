@@ -165,11 +165,7 @@ impl TeamManager {
     }
 
     /// Kill a teammate and remove it from the team's `members.json`.
-    pub async fn remove_member(
-        &self,
-        team: &TeamId,
-        id: &TeammateId,
-    ) -> Result<(), SwarmError> {
+    pub async fn remove_member(&self, team: &TeamId, id: &TeammateId) -> Result<(), SwarmError> {
         let team_root = self.team_root(team);
         if !team_root.exists() {
             return Err(SwarmError::TeamNotFound(team.0.clone()));

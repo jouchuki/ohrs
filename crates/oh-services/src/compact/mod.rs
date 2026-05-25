@@ -328,7 +328,10 @@ impl Compactor {
     /// Return true if the message consists entirely of `ToolResult` blocks.
     fn is_tool_result_message(msg: &ConversationMessage) -> bool {
         !msg.content.is_empty()
-            && msg.content.iter().all(|b| matches!(b, ContentBlock::ToolResult(_)))
+            && msg
+                .content
+                .iter()
+                .all(|b| matches!(b, ContentBlock::ToolResult(_)))
     }
 
     /// Format a message slice as a human-readable transcript for the summarizer.
@@ -457,7 +460,10 @@ mod tests {
         let long = vec![text_msg(Role::User, &"hello".repeat(100))];
         let t_short = Compactor::estimate_tokens(&short);
         let t_long = Compactor::estimate_tokens(&long);
-        assert!(t_long > t_short * 50, "token estimate should scale with content");
+        assert!(
+            t_long > t_short * 50,
+            "token estimate should scale with content"
+        );
     }
 
     #[test]
@@ -701,9 +707,7 @@ mod tests {
 
     #[test]
     fn is_prompt_too_long_openai_maximum_context_length() {
-        let err = ApiError::Request(
-            "maximum context length exceeded for model gpt-4o".into(),
-        );
+        let err = ApiError::Request("maximum context length exceeded for model gpt-4o".into());
         assert!(Compactor::is_prompt_too_long_error(&err));
     }
 
@@ -745,9 +749,8 @@ mod tests {
 
     #[test]
     fn is_prompt_too_long_context_window_phrase() {
-        let err = ApiError::Request(
-            "your request exceeded the context window for claude-3-opus".into(),
-        );
+        let err =
+            ApiError::Request("your request exceeded the context window for claude-3-opus".into());
         assert!(Compactor::is_prompt_too_long_error(&err));
     }
 

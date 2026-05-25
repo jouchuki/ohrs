@@ -179,7 +179,9 @@ mod tests {
     #[tokio::test]
     async fn test_execute_missing_prompt() {
         let tool = AgentTool;
-        let result = tool.execute(serde_json::json!({}), &ctx_with_spawner()).await;
+        let result = tool
+            .execute(serde_json::json!({}), &ctx_with_spawner())
+            .await;
         assert!(result.is_error);
         assert!(result.output.contains("prompt"));
     }
@@ -213,10 +215,7 @@ mod tests {
     async fn test_execute_defaults_subagent_type() {
         let tool = AgentTool;
         let result = tool
-            .execute(
-                serde_json::json!({"prompt": "hello"}),
-                &ctx_with_spawner(),
-            )
+            .execute(serde_json::json!({"prompt": "hello"}), &ctx_with_spawner())
             .await;
         assert!(!result.is_error);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();

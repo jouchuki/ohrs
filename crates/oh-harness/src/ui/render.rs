@@ -26,10 +26,10 @@ pub fn render(f: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),     // conversation
-            Constraint::Length(1),  // separator + status
-            Constraint::Length(1),  // input / spinner
-            Constraint::Length(1),  // hints
+            Constraint::Min(5),    // conversation
+            Constraint::Length(1), // separator + status
+            Constraint::Length(1), // input / spinner
+            Constraint::Length(1), // hints
         ])
         .split(f.area());
 
@@ -54,7 +54,9 @@ fn render_conversation(f: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(
                 "  OpenHarness",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" v0.1.0", Style::default().fg(Color::DarkGray)),
         ]));
@@ -260,7 +262,10 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     }
 
     parts.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
-    parts.push(Span::styled(format!("{} ", state.permission_mode), mode_style));
+    parts.push(Span::styled(
+        format!("{} ", state.permission_mode),
+        mode_style,
+    ));
 
     let status = Paragraph::new(Line::from(parts)).style(Style::default().bg(Color::Black));
     f.render_widget(status, area);

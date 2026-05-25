@@ -130,9 +130,7 @@ use crate::mailbox::Mailbox;
 
 /// Async body signature for an in-process teammate task.
 pub type TaskBody = Box<
-    dyn Fn(CancellationToken, Mailbox) -> Pin<Box<dyn Future<Output = ()> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(CancellationToken, Mailbox) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
 >;
 
 /// Configuration for spawning a teammate via a [`Backend`](crate::backend::Backend).
@@ -162,9 +160,7 @@ impl TeammateConfig {
     {
         TeammateConfig {
             display_name: Some(display_name.into()),
-            body: Some(Arc::new(Box::new(move |tok, mb| {
-                Box::pin(f(tok, mb))
-            }))),
+            body: Some(Arc::new(Box::new(move |tok, mb| Box::pin(f(tok, mb))))),
         }
     }
 

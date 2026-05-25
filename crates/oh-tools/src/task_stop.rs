@@ -92,9 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_id() {
-        let result = TaskStopTool
-            .execute(serde_json::json!({}), &ctx())
-            .await;
+        let result = TaskStopTool.execute(serde_json::json!({}), &ctx()).await;
         assert!(result.is_error);
         assert!(result.output.contains("id"));
     }

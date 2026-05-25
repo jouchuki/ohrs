@@ -130,10 +130,7 @@ impl crate::traits::Tool for SkillTool {
 
                 if let Some(val) = content {
                     // Substitute $ARGUMENTS with the args parameter
-                    let args = arguments
-                        .get("args")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let args = arguments.get("args").and_then(|v| v.as_str()).unwrap_or("");
 
                     let text = if let Some(t) = val.as_str() {
                         t.to_string()
@@ -154,7 +151,9 @@ impl crate::traits::Tool for SkillTool {
         // List available skills in error message
         let entries = self.get_entries();
         if entries.is_empty() {
-            ToolResult::error(format!("Skill not found: {skill_name}. No skills are registered."))
+            ToolResult::error(format!(
+                "Skill not found: {skill_name}. No skills are registered."
+            ))
         } else {
             let available: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             ToolResult::error(format!(
@@ -194,8 +193,14 @@ mod tests {
     fn test_schema_with_skills_has_enum() {
         let tool = SkillTool::new();
         tool.set_available_skills(vec![
-            SkillEntry { name: "commit".into(), description: "Create a git commit".into() },
-            SkillEntry { name: "review".into(), description: "Review code".into() },
+            SkillEntry {
+                name: "commit".into(),
+                description: "Create a git commit".into(),
+            },
+            SkillEntry {
+                name: "review".into(),
+                description: "Review code".into(),
+            },
         ]);
         let schema = tool.input_schema();
         let enum_vals = schema["properties"]["skill"]["enum"].as_array().unwrap();
@@ -207,11 +212,14 @@ mod tests {
     #[test]
     fn test_schema_description_lists_skills() {
         let tool = SkillTool::new();
-        tool.set_available_skills(vec![
-            SkillEntry { name: "deploy".into(), description: "Deploy to prod".into() },
-        ]);
+        tool.set_available_skills(vec![SkillEntry {
+            name: "deploy".into(),
+            description: "Deploy to prod".into(),
+        }]);
         let schema = tool.input_schema();
-        let desc = schema["properties"]["skill"]["description"].as_str().unwrap();
+        let desc = schema["properties"]["skill"]["description"]
+            .as_str()
+            .unwrap();
         assert!(desc.contains("deploy: Deploy to prod"));
     }
 
@@ -224,9 +232,10 @@ mod tests {
     #[tokio::test]
     async fn test_skill_not_found_lists_available() {
         let tool = SkillTool::new();
-        tool.set_available_skills(vec![
-            SkillEntry { name: "foo".into(), description: "".into() },
-        ]);
+        tool.set_available_skills(vec![SkillEntry {
+            name: "foo".into(),
+            description: "".into(),
+        }]);
         let result = tool
             .execute(serde_json::json!({"skill": "nonexistent"}), &ctx())
             .await;

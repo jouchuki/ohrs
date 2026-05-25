@@ -60,9 +60,7 @@ impl crate::traits::Tool for TaskCreateTool {
         }
 
         if command.is_some() && prompt.is_some() {
-            return ToolResult::error(
-                "Provide either 'command' or 'prompt', not both",
-            );
+            return ToolResult::error("Provide either 'command' or 'prompt', not both");
         }
 
         let tasks = match context.tasks.as_ref() {
@@ -138,9 +136,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_description() {
-        let result = TaskCreateTool
-            .execute(serde_json::json!({}), &ctx())
-            .await;
+        let result = TaskCreateTool.execute(serde_json::json!({}), &ctx()).await;
         assert!(result.is_error);
         assert!(result.output.contains("description"));
     }
@@ -148,10 +144,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_command_and_prompt() {
         let result = TaskCreateTool
-            .execute(
-                serde_json::json!({"description": "test task"}),
-                &ctx(),
-            )
+            .execute(serde_json::json!({"description": "test task"}), &ctx())
             .await;
         assert!(result.is_error);
         assert!(result.output.contains("command"));

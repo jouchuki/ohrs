@@ -43,10 +43,7 @@ pub enum SkillError {
     /// This is non-fatal — the file is skipped — but the variant lets callers
     /// inspect the reason programmatically when needed.
     #[error("invalid frontmatter in {path}: {reason}")]
-    InvalidFrontmatter {
-        path: PathBuf,
-        reason: String,
-    },
+    InvalidFrontmatter { path: PathBuf, reason: String },
 }
 
 // ── Domain types ──────────────────────────────────────────────────────────────
@@ -184,13 +181,14 @@ impl SkillLoader {
 
             // Collect subdirectory entries first so we can sort them.
             let mut entries: Vec<PathBuf> = Vec::new();
-            while let Some(entry) = read_dir
-                .next_entry()
-                .await
-                .map_err(|e| SkillError::ReadDir {
-                    path: root.clone(),
-                    source: e,
-                })?
+            while let Some(entry) =
+                read_dir
+                    .next_entry()
+                    .await
+                    .map_err(|e| SkillError::ReadDir {
+                        path: root.clone(),
+                        source: e,
+                    })?
             {
                 let path = entry.path();
                 if path.is_dir() {
@@ -229,10 +227,7 @@ impl SkillLoader {
 /// valid frontmatter — a [`SkillError::InvalidFrontmatter`] is constructed for
 /// context and logged as a warning, but the file is intentionally skipped rather
 /// than failing the entire load.  I/O failures propagate as `Err`.
-async fn load_skill_file(
-    path: &Path,
-    dir: &Path,
-) -> Result<Option<Skill>, SkillError> {
+async fn load_skill_file(path: &Path, dir: &Path) -> Result<Option<Skill>, SkillError> {
     let raw = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| SkillError::Io {
@@ -307,8 +302,8 @@ fn parse_skill_markdown(raw: &str, default_name: &str) -> Result<ParsedSkill, St
         String::new()
     };
 
-    let fm: Frontmatter = serde_yaml::from_str(yaml_block)
-        .map_err(|e| format!("YAML parse error: {e}"))?;
+    let fm: Frontmatter =
+        serde_yaml::from_str(yaml_block).map_err(|e| format!("YAML parse error: {e}"))?;
 
     let name = fm
         .name
@@ -482,7 +477,10 @@ mod tests {
 
         // …but is excluded from the tool metadata map.
         let meta = registry.to_tool_metadata();
-        assert!(meta.get("hidden").is_none(), "disabled skill should not appear in metadata");
+        assert!(
+            meta.get("hidden").is_none(),
+            "disabled skill should not appear in metadata"
+        );
         assert!(meta.get("visible").is_some());
     }
 

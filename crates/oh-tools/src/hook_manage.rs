@@ -87,14 +87,11 @@ impl crate::traits::Tool for HookManageTool {
         };
 
         // Get the hook registry from context metadata
-        let _registry_handle = context
-            .metadata
-            .get("hook_registry")
-            .and({
-                // The registry handle is stored as a serialized pointer (set by cli.rs)
-                // We use a different approach: look for it in a global or passed via Arc
-                None::<()>
-            });
+        let _registry_handle = context.metadata.get("hook_registry").and({
+            // The registry handle is stored as a serialized pointer (set by cli.rs)
+            // We use a different approach: look for it in a global or passed via Arc
+            None::<()>
+        });
 
         // For now, use the global approach — the hook registry is accessible
         // via the metadata as a JSON-serialized snapshot for 'list',
@@ -105,10 +102,16 @@ impl crate::traits::Tool for HookManageTool {
             "list" => {
                 // Return the current hooks as readable text
                 // The actual registry is in the executor, we can read it from metadata
-                if let Some(summary) = context.metadata.get("hook_summary").and_then(|v| v.as_str()) {
+                if let Some(summary) = context
+                    .metadata
+                    .get("hook_summary")
+                    .and_then(|v| v.as_str())
+                {
                     ToolResult::success(summary)
                 } else {
-                    ToolResult::success("No hooks currently registered. Use action='add' to register hooks.")
+                    ToolResult::success(
+                        "No hooks currently registered. Use action='add' to register hooks.",
+                    )
                 }
             }
             "add" => {
@@ -122,20 +125,23 @@ impl crate::traits::Tool for HookManageTool {
                 };
 
                 // Validate event name
-                let _event: HookEvent = match serde_json::from_value(
-                    serde_json::Value::String(event_str.to_string()),
-                ) {
+                let _event: HookEvent = match serde_json::from_value(serde_json::Value::String(
+                    event_str.to_string(),
+                )) {
                     Ok(e) => e,
                     Err(_) => {
                         return ToolResult::error(format!(
-                            "Unknown event: '{event_str}'. Valid events: session_start, session_end, \
+                        "Unknown event: '{event_str}'. Valid events: session_start, session_end, \
                              pre_tool_use, post_tool_use, pre_api_request, post_api_response, \
                              query_turn_start, query_turn_end, error_occurred, etc."
-                        ))
+                    ))
                     }
                 };
 
-                let matcher = arguments.get("matcher").and_then(|v| v.as_str()).map(String::from);
+                let matcher = arguments
+                    .get("matcher")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let matcher_display = matcher.clone();
                 let block = arguments
                     .get("block_on_failure")
@@ -146,40 +152,46 @@ impl crate::traits::Tool for HookManageTool {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(30) as u32;
 
-                let hook_def = match hook_type {
-                    "command" => {
-                        let cmd = match arguments.get("command").and_then(|v| v.as_str()) {
-                            Some(c) => c,
-                            None => return ToolResult::error("Missing required parameter: command (for hook_type='command')"),
-                        };
-                        HookDefinition::Command(oh_types::hooks::CommandHookDefinition {
-                            r#type: "command".into(),
-                            command: cmd.to_string(),
-                            timeout_seconds: timeout,
-                            matcher,
-                            block_on_failure: block,
-                        })
-                    }
-                    "http" => {
-                        let url = match arguments.get("url").and_then(|v| v.as_str()) {
-                            Some(u) => u,
-                            None => return ToolResult::error("Missing required parameter: url (for hook_type='http')"),
-                        };
-                        HookDefinition::Http(oh_types::hooks::HttpHookDefinition {
-                            r#type: "http".into(),
-                            url: url.to_string(),
-                            headers: std::collections::HashMap::new(),
-                            timeout_seconds: timeout,
-                            matcher,
-                            block_on_failure: block,
-                        })
-                    }
-                    other => {
-                        return ToolResult::error(format!(
-                            "Unsupported hook_type: '{other}'. Use 'command' or 'http'."
-                        ))
-                    }
-                };
+                let hook_def =
+                    match hook_type {
+                        "command" => {
+                            let cmd = match arguments.get("command").and_then(|v| v.as_str()) {
+                                Some(c) => c,
+                                None => return ToolResult::error(
+                                    "Missing required parameter: command (for hook_type='command')",
+                                ),
+                            };
+                            HookDefinition::Command(oh_types::hooks::CommandHookDefinition {
+                                r#type: "command".into(),
+                                command: cmd.to_string(),
+                                timeout_seconds: timeout,
+                                matcher,
+                                block_on_failure: block,
+                            })
+                        }
+                        "http" => {
+                            let url =
+                                match arguments.get("url").and_then(|v| v.as_str()) {
+                                    Some(u) => u,
+                                    None => return ToolResult::error(
+                                        "Missing required parameter: url (for hook_type='http')",
+                                    ),
+                                };
+                            HookDefinition::Http(oh_types::hooks::HttpHookDefinition {
+                                r#type: "http".into(),
+                                url: url.to_string(),
+                                headers: std::collections::HashMap::new(),
+                                timeout_seconds: timeout,
+                                matcher,
+                                block_on_failure: block,
+                            })
+                        }
+                        other => {
+                            return ToolResult::error(format!(
+                                "Unsupported hook_type: '{other}'. Use 'command' or 'http'."
+                            ))
+                        }
+                    };
 
                 // Serialize the hook definition as JSON so the caller (cli.rs) can
                 // apply it to the actual registry
@@ -199,7 +211,10 @@ impl crate::traits::Tool for HookManageTool {
                         "Registered {} hook on '{}' event{}:\n{}",
                         hook_type,
                         event_str,
-                        matcher_display.as_ref().map(|m| format!(" (matcher: {m})")).unwrap_or_default(),
+                        matcher_display
+                            .as_ref()
+                            .map(|m| format!(" (matcher: {m})"))
+                            .unwrap_or_default(),
                         hook_json,
                     ),
                     is_error: false,
@@ -212,9 +227,11 @@ impl crate::traits::Tool for HookManageTool {
                 match event_str {
                     Some(e) => {
                         // Validate event
-                        if serde_json::from_value::<HookEvent>(
-                            serde_json::Value::String(e.to_string()),
-                        ).is_err() {
+                        if serde_json::from_value::<HookEvent>(serde_json::Value::String(
+                            e.to_string(),
+                        ))
+                        .is_err()
+                        {
                             return ToolResult::error(format!("Unknown event: '{e}'"));
                         }
 

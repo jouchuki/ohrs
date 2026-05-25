@@ -66,10 +66,7 @@ impl crate::traits::Tool for FileReadTool {
         // Check for null bytes in first 8KB to detect binary files
         let check_len = raw.len().min(8192);
         if raw[..check_len].contains(&0) {
-            return ToolResult::error(format!(
-                "Binary file cannot be read as text: {}",
-                file_path
-            ));
+            return ToolResult::error(format!("Binary file cannot be read as text: {}", file_path));
         }
 
         let text = String::from_utf8_lossy(&raw);

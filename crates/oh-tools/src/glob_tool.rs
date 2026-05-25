@@ -118,9 +118,18 @@ mod tests {
 
         assert!(!result.is_error);
         let output = &result.output;
-        assert!(output.contains("foo.rs"), "expected foo.rs in output: {output}");
-        assert!(output.contains("bar.rs"), "expected bar.rs in output: {output}");
-        assert!(!output.contains("baz.txt"), "should not contain baz.txt: {output}");
+        assert!(
+            output.contains("foo.rs"),
+            "expected foo.rs in output: {output}"
+        );
+        assert!(
+            output.contains("bar.rs"),
+            "expected bar.rs in output: {output}"
+        );
+        assert!(
+            !output.contains("baz.txt"),
+            "should not contain baz.txt: {output}"
+        );
     }
 
     #[tokio::test]
@@ -146,10 +155,7 @@ mod tests {
         let ctx = ToolExecutionContext::new(dir.path().to_path_buf());
         let tool = GlobTool;
         let result = tool
-            .execute(
-                serde_json::json!({"pattern": "*.rs", "path": "sub"}),
-                &ctx,
-            )
+            .execute(serde_json::json!({"pattern": "*.rs", "path": "sub"}), &ctx)
             .await;
 
         assert!(!result.is_error);

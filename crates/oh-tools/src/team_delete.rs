@@ -64,9 +64,7 @@ mod tests {
 
         // Delete
         let tool = TeamDeleteTool;
-        let result = tool
-            .execute(serde_json::json!({"name": name}), &ctx)
-            .await;
+        let result = tool.execute(serde_json::json!({"name": name}), &ctx).await;
         assert!(!result.is_error, "Expected success, got: {}", result.output);
         assert_eq!(result.output, format!("Deleted team: {name}"));
     }

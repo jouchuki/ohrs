@@ -23,10 +23,10 @@ pub mod worktree;
 pub use backend::{Backend, TeammateStatus};
 pub use error::SwarmError;
 pub use in_process::InProcessBackend;
-pub use subprocess::SubprocessBackend;
-pub use worktree::{add_worktree, remove_worktree, WorktreeBackend};
 pub use mailbox::Mailbox;
+pub use subprocess::SubprocessBackend;
 pub use team::TeamManager;
 pub use types::{
     Message, MessageKind, TaskBody, TeamId, TeammateConfig, TeammateHandle, TeammateId,
 };
+pub use worktree::{add_worktree, remove_worktree, WorktreeBackend};

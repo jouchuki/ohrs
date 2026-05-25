@@ -50,9 +50,7 @@ impl crate::traits::Tool for TaskUpdateTool {
             return ToolResult::error("Task manager not available");
         }
 
-        let description = arguments
-            .get("description")
-            .and_then(|v| v.as_str());
+        let description = arguments.get("description").and_then(|v| v.as_str());
 
         // Actual update is wired at the CLI level.
         let mut parts = vec![format!("Updated task {id}")];
@@ -100,9 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_id() {
-        let result = TaskUpdateTool
-            .execute(serde_json::json!({}), &ctx())
-            .await;
+        let result = TaskUpdateTool.execute(serde_json::json!({}), &ctx()).await;
         assert!(result.is_error);
         assert!(result.output.contains("id"));
     }

@@ -7,18 +7,12 @@ pub mod executor;
 pub mod loader;
 pub mod matching;
 
-pub use oh_types::hooks::{
-    AggregatedHookResult, HookDefinition, HookEvent, HookResult,
-};
+pub use oh_types::hooks::{AggregatedHookResult, HookDefinition, HookEvent, HookResult};
 
 use async_trait::async_trait;
 
 /// Trait for hook execution — used by the engine.
 #[async_trait]
 pub trait HookExecutorTrait: Send + Sync {
-    async fn execute(
-        &self,
-        event: HookEvent,
-        payload: serde_json::Value,
-    ) -> AggregatedHookResult;
+    async fn execute(&self, event: HookEvent, payload: serde_json::Value) -> AggregatedHookResult;
 }

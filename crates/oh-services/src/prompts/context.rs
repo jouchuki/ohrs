@@ -11,10 +11,7 @@ pub fn assemble(cwd: &Path, bare: bool) -> String {
     let env = environment::gather(cwd);
     let env_section = environment::format_section(&env);
 
-    let mut sections: Vec<String> = vec![
-        base::BASE_SYSTEM_PROMPT.to_owned(),
-        env_section,
-    ];
+    let mut sections: Vec<String> = vec![base::BASE_SYSTEM_PROMPT.to_owned(), env_section];
 
     if !bare {
         if let Some(claude_md) = claudemd::load_prompt(cwd) {

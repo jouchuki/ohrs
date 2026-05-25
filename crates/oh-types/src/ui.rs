@@ -184,7 +184,9 @@ mod tests {
 
     #[test]
     fn test_frontend_request_submit_line_serde() {
-        let req = FrontendRequest::SubmitLine { line: Some("hello".into()) };
+        let req = FrontendRequest::SubmitLine {
+            line: Some("hello".into()),
+        };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"type\":\"submit_line\""));
         let deser: FrontendRequest = serde_json::from_str(&json).unwrap();

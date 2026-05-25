@@ -115,6 +115,7 @@ impl crate::traits::Tool for TeammateMessageTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // ENV_TEST_LOCK is intentionally held across .await to serialize env-mutating tests
 mod tests {
     use super::*;
     use crate::traits::Tool;
@@ -171,7 +172,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_delivers_to_mailbox_and_requests_hook() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Override the tasks dir so the mailbox writes into a temp location.
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("OPENHARNESSRS_DATA_DIR", dir.path());

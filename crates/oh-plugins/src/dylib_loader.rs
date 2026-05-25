@@ -14,15 +14,14 @@ pub fn load_native_plugin(
     path: &Path,
     enabled_plugins: &HashMap<String, bool>,
 ) -> Result<LoadedPlugin, NativePluginError> {
-    let dylib_path = find_dylib(path)
-        .ok_or_else(|| NativePluginError::NoDylib(path.display().to_string()))?;
+    let dylib_path =
+        find_dylib(path).ok_or_else(|| NativePluginError::NoDylib(path.display().to_string()))?;
 
     let start = Instant::now();
 
     // Safety: loading shared libraries is inherently unsafe.
     let lib = unsafe {
-        Library::new(&dylib_path)
-            .map_err(|e| NativePluginError::LoadFailed(e.to_string()))?
+        Library::new(&dylib_path).map_err(|e| NativePluginError::LoadFailed(e.to_string()))?
     };
 
     // Look up the vtable symbol
@@ -59,9 +58,7 @@ pub fn load_native_plugin(
 
     // Initialize
     let config = serde_json::json!({}).to_string();
-    let init_result = unsafe {
-        ((*vtable).init)(config.as_ptr(), config.len())
-    };
+    let init_result = unsafe { ((*vtable).init)(config.as_ptr(), config.len()) };
     if init_result != OH_OK {
         return Err(NativePluginError::InitFailed(init_result));
     }

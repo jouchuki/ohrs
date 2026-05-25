@@ -64,11 +64,9 @@ impl crate::traits::Tool for NotebookEditTool {
         let path = resolve_path(&context.cwd, notebook_path);
 
         match edit_notebook_cell(&path, cell_index, new_source) {
-            Ok(()) => ToolResult::success(format!(
-                "Updated cell {} in {}",
-                cell_index,
-                path.display()
-            )),
+            Ok(()) => {
+                ToolResult::success(format!("Updated cell {} in {}", cell_index, path.display()))
+            }
             Err(e) => ToolResult::error(format!("Failed to edit notebook: {}", e)),
         }
     }
@@ -83,11 +81,7 @@ fn resolve_path(base: &Path, candidate: &str) -> PathBuf {
     }
 }
 
-fn edit_notebook_cell(
-    path: &Path,
-    cell_index: usize,
-    new_source: &str,
-) -> Result<(), String> {
+fn edit_notebook_cell(path: &Path, cell_index: usize, new_source: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
 

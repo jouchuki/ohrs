@@ -97,7 +97,16 @@ mod tests {
     #[test]
     fn test_build_worktree_add_args() {
         let args = build_worktree_add_args("my-branch", "/tmp/worktrees/my-branch");
-        assert_eq!(args, vec!["worktree", "add", "-b", "my-branch", "/tmp/worktrees/my-branch"]);
+        assert_eq!(
+            args,
+            vec![
+                "worktree",
+                "add",
+                "-b",
+                "my-branch",
+                "/tmp/worktrees/my-branch"
+            ]
+        );
     }
 
     #[test]
@@ -105,7 +114,10 @@ mod tests {
         let cwd = PathBuf::from("/repo");
         let branch = "feature-x";
         let path = cwd.join(".openharness").join("worktrees").join(branch);
-        assert_eq!(path, PathBuf::from("/repo/.openharness/worktrees/feature-x"));
+        assert_eq!(
+            path,
+            PathBuf::from("/repo/.openharness/worktrees/feature-x")
+        );
     }
 
     #[test]

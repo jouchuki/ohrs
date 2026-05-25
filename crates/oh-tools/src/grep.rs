@@ -38,7 +38,13 @@ fn type_to_extensions(file_type: &str) -> Vec<String> {
         "go" => vec!["go".into()],
         "java" => vec!["java".into()],
         "c" => vec!["c".into(), "h".into()],
-        "cpp" => vec!["cpp".into(), "cc".into(), "cxx".into(), "hpp".into(), "hxx".into()],
+        "cpp" => vec![
+            "cpp".into(),
+            "cc".into(),
+            "cxx".into(),
+            "hpp".into(),
+            "hxx".into(),
+        ],
         "rb" => vec!["rb".into()],
         "md" => vec!["md".into()],
         "json" => vec!["json".into()],
@@ -150,7 +156,10 @@ impl crate::traits::Tool for GrepTool {
             None => return ToolResult::error("Missing required parameter: pattern"),
         };
 
-        let case_insensitive = arguments.get("-i").and_then(|v| v.as_bool()).unwrap_or(false);
+        let case_insensitive = arguments
+            .get("-i")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let output_mode = arguments
             .get("output_mode")
             .and_then(|v| v.as_str())
@@ -159,19 +168,13 @@ impl crate::traits::Tool for GrepTool {
             .get("head_limit")
             .and_then(|v| v.as_u64())
             .unwrap_or(DEFAULT_HEAD_LIMIT as u64) as usize;
-        let show_line_numbers = arguments.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
-        let context_after = arguments
-            .get("-A")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let context_before = arguments
-            .get("-B")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let context_around = arguments
-            .get("-C")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let show_line_numbers = arguments
+            .get("-n")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let context_after = arguments.get("-A").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let context_before = arguments.get("-B").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let context_around = arguments.get("-C").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let after = context_after.max(context_around);
         let before = context_before.max(context_around);
@@ -187,10 +190,7 @@ impl crate::traits::Tool for GrepTool {
             Err(e) => return ToolResult::error(format!("Invalid regex: {e}")),
         };
 
-        let search_dir = resolve_path(
-            &context.cwd,
-            arguments.get("path").and_then(|v| v.as_str()),
-        );
+        let search_dir = resolve_path(&context.cwd, arguments.get("path").and_then(|v| v.as_str()));
 
         let glob_filter = arguments.get("glob").and_then(|v| v.as_str());
         let type_filter = arguments.get("type").and_then(|v| v.as_str());
@@ -204,9 +204,7 @@ impl crate::traits::Tool for GrepTool {
                 break;
             }
 
-            let rel_path = file_path
-                .strip_prefix(&search_dir)
-                .unwrap_or(file_path);
+            let rel_path = file_path.strip_prefix(&search_dir).unwrap_or(file_path);
 
             if let Some(glob_pat) = glob_filter {
                 if !matches_glob_filter(rel_path, glob_pat) {
@@ -259,12 +257,12 @@ impl crate::traits::Tool for GrepTool {
                         }
                     }
 
-                    let mut emitted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                    let mut emitted: std::collections::HashSet<usize> =
+                        std::collections::HashSet::new();
                     for &idx in &match_indices {
                         let start = idx.saturating_sub(before);
                         let end = (idx + after + 1).min(all_lines.len());
-                        for (i, &line) in
-                            all_lines.iter().enumerate().skip(start).take(end - start)
+                        for (i, &line) in all_lines.iter().enumerate().skip(start).take(end - start)
                         {
                             if emitted.insert(i) {
                                 let line_no = i + 1;
@@ -303,9 +301,21 @@ mod tests {
 
     fn setup_test_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("hello.rs"), "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
-        fs::write(dir.path().join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
-        fs::write(dir.path().join("notes.txt"), "Hello World\nfoo bar\nHELLO again\n").unwrap();
+        fs::write(
+            dir.path().join("hello.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes.txt"),
+            "Hello World\nfoo bar\nHELLO again\n",
+        )
+        .unwrap();
         dir
     }
 
@@ -322,8 +332,16 @@ mod tests {
             .await;
 
         assert!(!result.is_error);
-        assert!(result.output.contains("fn main"), "output: {}", result.output);
-        assert!(result.output.contains("fn add"), "output: {}", result.output);
+        assert!(
+            result.output.contains("fn main"),
+            "output: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("fn add"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -341,7 +359,11 @@ mod tests {
         assert!(!result.is_error);
         // Should match "Hello World", "hello", and "HELLO again"
         let lines: Vec<&str> = result.output.lines().collect();
-        assert!(lines.len() >= 3, "expected at least 3 matches, got: {}", result.output);
+        assert!(
+            lines.len() >= 3,
+            "expected at least 3 matches, got: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -357,9 +379,21 @@ mod tests {
             .await;
 
         assert!(!result.is_error);
-        assert!(result.output.contains("hello.rs"), "output: {}", result.output);
-        assert!(result.output.contains("lib.rs"), "output: {}", result.output);
-        assert!(!result.output.contains("notes.txt"), "output: {}", result.output);
+        assert!(
+            result.output.contains("hello.rs"),
+            "output: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("lib.rs"),
+            "output: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("notes.txt"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -376,7 +410,11 @@ mod tests {
 
         assert!(!result.is_error);
         // Should contain path:line_no:content
-        assert!(result.output.contains(":2:"), "expected line number 2, output: {}", result.output);
+        assert!(
+            result.output.contains(":2:"),
+            "expected line number 2, output: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -393,7 +431,11 @@ mod tests {
 
         assert!(!result.is_error);
         // notes.txt should have matches
-        assert!(result.output.contains("notes.txt:"), "output: {}", result.output);
+        assert!(
+            result.output.contains("notes.txt:"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -402,10 +444,7 @@ mod tests {
         let ctx = ToolExecutionContext::new(dir.path().to_path_buf());
         let tool = GrepTool;
         let result = tool
-            .execute(
-                serde_json::json!({"pattern": "zzzznonexistent"}),
-                &ctx,
-            )
+            .execute(serde_json::json!({"pattern": "zzzznonexistent"}), &ctx)
             .await;
 
         assert!(!result.is_error);

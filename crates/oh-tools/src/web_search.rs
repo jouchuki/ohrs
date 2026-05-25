@@ -121,9 +121,11 @@ pub struct SearchResult {
 pub fn parse_search_results(body: &str, limit: usize) -> Vec<SearchResult> {
     use std::sync::LazyLock;
 
-    static SNIPPET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    static SNIPPET_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
         r#"(?is)<(?:a|div|span)[^>]+class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>(?P<snippet>.*?)</(?:a|div|span)>"#,
-    ).unwrap());
+    ).unwrap()
+    });
     static ANCHOR_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"(?is)<a(?P<attrs>[^>]+)>(?P<title>.*?)</a>"#).unwrap());
     static CLASS_RE: LazyLock<Regex> =
@@ -203,10 +205,8 @@ fn normalize_result_url(raw_url: &str) -> String {
 pub fn clean_html(fragment: &str) -> String {
     use std::sync::LazyLock;
 
-    static RE_TAGS: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)<[^>]+>").unwrap());
-    static RE_SPACES: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\s+").unwrap());
+    static RE_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<[^>]+>").unwrap());
+    static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
     let text = RE_TAGS.replace_all(fragment, " ");
     let text = text

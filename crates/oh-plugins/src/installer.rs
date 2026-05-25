@@ -21,8 +21,7 @@ pub fn install_plugin_from_path(source: &str) -> Result<String, String> {
     }
 
     // Copy directory recursively
-    copy_dir_recursive(source_path, &dest)
-        .map_err(|e| format!("Failed to copy plugin: {e}"))?;
+    copy_dir_recursive(source_path, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
 
     Ok(format!("Installed plugin: {plugin_name}"))
 }

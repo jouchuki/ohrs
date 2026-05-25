@@ -2,7 +2,7 @@
 
 use globset::{GlobSet, GlobSetBuilder};
 use oh_config::PermissionSettings;
-use oh_types::permissions::{PermissionDecision, PermissionMode, PermissionRequest, PathRule};
+use oh_types::permissions::{PathRule, PermissionDecision, PermissionMode, PermissionRequest};
 use opentelemetry::KeyValue;
 use std::sync::OnceLock;
 use tracing::instrument;
@@ -173,10 +173,8 @@ impl PermissionChecker {
     /// Return whether the tool may run immediately.
     #[instrument(skip(self), fields(tool = %request.tool_name, mode = ?self.settings.mode))]
     pub fn evaluate(&self, request: &PermissionRequest) -> PermissionDecision {
-        oh_telemetry::PERMISSION_CHECK_TOTAL.add(
-            1,
-            &[KeyValue::new("tool", request.tool_name.to_string())],
-        );
+        oh_telemetry::PERMISSION_CHECK_TOTAL
+            .add(1, &[KeyValue::new("tool", request.tool_name.to_string())]);
 
         // ------------------------------------------------------------------
         // 1. Sensitive-path check — runs FIRST, before anything else.
@@ -185,10 +183,8 @@ impl PermissionChecker {
         // ------------------------------------------------------------------
         if let Some(file_path) = request.file_path {
             if self.is_sensitive_path(file_path) {
-                oh_telemetry::PERMISSION_DENIED_COUNT.add(
-                    1,
-                    &[KeyValue::new("tool", request.tool_name.to_string())],
-                );
+                oh_telemetry::PERMISSION_DENIED_COUNT
+                    .add(1, &[KeyValue::new("tool", request.tool_name.to_string())]);
                 return PermissionDecision::deny(format!(
                     "Access to sensitive path denied: {}",
                     file_path
@@ -199,21 +195,26 @@ impl PermissionChecker {
         // ------------------------------------------------------------------
         // 2. Explicit tool deny list
         // ------------------------------------------------------------------
-        if self.settings.denied_tools.iter().any(|t| t == request.tool_name) {
-            oh_telemetry::PERMISSION_DENIED_COUNT.add(
-                1,
-                &[KeyValue::new("tool", request.tool_name.to_string())],
-            );
-            return PermissionDecision::deny(format!(
-                "{} is explicitly denied",
-                request.tool_name
-            ));
+        if self
+            .settings
+            .denied_tools
+            .iter()
+            .any(|t| t == request.tool_name)
+        {
+            oh_telemetry::PERMISSION_DENIED_COUNT
+                .add(1, &[KeyValue::new("tool", request.tool_name.to_string())]);
+            return PermissionDecision::deny(format!("{} is explicitly denied", request.tool_name));
         }
 
         // ------------------------------------------------------------------
         // 3. Explicit tool allow list
         // ------------------------------------------------------------------
-        if self.settings.allowed_tools.iter().any(|t| t == request.tool_name) {
+        if self
+            .settings
+            .allowed_tools
+            .iter()
+            .any(|t| t == request.tool_name)
+        {
             return PermissionDecision::allow(format!(
                 "{} is explicitly allowed",
                 request.tool_name
@@ -226,10 +227,8 @@ impl PermissionChecker {
         if let Some(file_path) = request.file_path {
             for rule in &self.path_rules {
                 if glob_match(&rule.pattern, file_path) && !rule.allow {
-                    oh_telemetry::PERMISSION_DENIED_COUNT.add(
-                        1,
-                        &[KeyValue::new("tool", request.tool_name.to_string())],
-                    );
+                    oh_telemetry::PERMISSION_DENIED_COUNT
+                        .add(1, &[KeyValue::new("tool", request.tool_name.to_string())]);
                     return PermissionDecision::deny(format!(
                         "Path {} matches deny rule: {}",
                         file_path, rule.pattern
@@ -244,10 +243,8 @@ impl PermissionChecker {
         if let Some(command) = request.command {
             for pattern in &self.settings.denied_commands {
                 if glob_match(pattern, command) {
-                    oh_telemetry::PERMISSION_DENIED_COUNT.add(
-                        1,
-                        &[KeyValue::new("tool", request.tool_name.to_string())],
-                    );
+                    oh_telemetry::PERMISSION_DENIED_COUNT
+                        .add(1, &[KeyValue::new("tool", request.tool_name.to_string())]);
                     return PermissionDecision::deny(format!(
                         "Command matches deny pattern: {}",
                         pattern
@@ -274,10 +271,8 @@ impl PermissionChecker {
         // 8. Plan mode: block mutating tools
         // ------------------------------------------------------------------
         if self.settings.mode == PermissionMode::Plan {
-            oh_telemetry::PERMISSION_DENIED_COUNT.add(
-                1,
-                &[KeyValue::new("tool", request.tool_name.to_string())],
-            );
+            oh_telemetry::PERMISSION_DENIED_COUNT
+                .add(1, &[KeyValue::new("tool", request.tool_name.to_string())]);
             return PermissionDecision::deny(
                 "Plan mode blocks mutating tools until the user exits plan mode",
             );
@@ -286,9 +281,7 @@ impl PermissionChecker {
         // ------------------------------------------------------------------
         // 9. Default mode: require confirmation for mutating tools
         // ------------------------------------------------------------------
-        PermissionDecision::confirm(
-            "Mutating tools require user confirmation in default mode",
-        )
+        PermissionDecision::confirm("Mutating tools require user confirmation in default mode")
     }
 }
 
@@ -440,7 +433,10 @@ mod tests {
         };
         let checker = PermissionChecker::new(s);
         let decision = checker.evaluate(&request("tool_x", false));
-        assert!(!decision.allowed, "deny list should take precedence over allow list");
+        assert!(
+            !decision.allowed,
+            "deny list should take precedence over allow list"
+        );
     }
 
     // --- Path glob rules ---
@@ -531,7 +527,11 @@ mod tests {
 
     #[test]
     fn read_only_allowed_in_all_modes() {
-        for mode in [PermissionMode::Default, PermissionMode::Plan, PermissionMode::FullAuto] {
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::FullAuto,
+        ] {
             let checker = PermissionChecker::new(settings(mode));
             let decision = checker.evaluate(&request("any_tool", true));
             assert!(
@@ -560,12 +560,12 @@ mod tests {
     #[test]
     fn sensitive_ssh_id_rsa_denied_read_full_auto() {
         let checker = PermissionChecker::new(settings(PermissionMode::FullAuto));
-        let decision = checker.evaluate(&req_with_path(
-            "read_file",
-            true,
-            "/home/alice/.ssh/id_rsa",
-        ));
-        assert!(!decision.allowed, "id_rsa should be denied in FullAuto read");
+        let decision =
+            checker.evaluate(&req_with_path("read_file", true, "/home/alice/.ssh/id_rsa"));
+        assert!(
+            !decision.allowed,
+            "id_rsa should be denied in FullAuto read"
+        );
         assert!(
             decision.reason.contains("sensitive"),
             "reason should mention sensitive path, got: {}",
@@ -583,7 +583,10 @@ mod tests {
             false,
             "/home/alice/.aws/credentials",
         ));
-        assert!(!decision.allowed, ".aws/credentials should be denied for write");
+        assert!(
+            !decision.allowed,
+            ".aws/credentials should be denied for write"
+        );
     }
 
     // --- .env in project dir denied read ---
@@ -671,11 +674,8 @@ mod tests {
         };
         let checker = PermissionChecker::new(s);
         // id_rsa is NOT in the override list — must still be denied
-        let decision = checker.evaluate(&req_with_path(
-            "read_file",
-            true,
-            "/home/alice/.ssh/id_rsa",
-        ));
+        let decision =
+            checker.evaluate(&req_with_path("read_file", true, "/home/alice/.ssh/id_rsa"));
         assert!(!decision.allowed, "id_rsa should still be denied");
     }
 
@@ -684,11 +684,7 @@ mod tests {
     #[test]
     fn non_sensitive_tmp_file_allowed_full_auto() {
         let checker = PermissionChecker::new(settings(PermissionMode::FullAuto));
-        let decision = checker.evaluate(&req_with_path(
-            "read_file",
-            true,
-            "/tmp/foo.txt",
-        ));
+        let decision = checker.evaluate(&req_with_path("read_file", true, "/tmp/foo.txt"));
         assert!(decision.allowed, "/tmp/foo.txt should not be sensitive");
     }
 
@@ -700,7 +696,10 @@ mod tests {
             true,
             "/home/alice/Documents/notes.md",
         ));
-        assert!(decision.allowed, "~/Documents/notes.md should not be sensitive");
+        assert!(
+            decision.allowed,
+            "~/Documents/notes.md should not be sensitive"
+        );
     }
 
     // --- is_sensitive_path unit tests ---
@@ -741,9 +740,13 @@ mod tests {
             ..Default::default()
         };
         let checker = PermissionChecker::new(s);
-        assert!(!checker.is_sensitive_path("/home/user/.ssh/known_hosts"),
-            "known_hosts should not be sensitive when overridden");
-        assert!(checker.is_sensitive_path("/home/user/.ssh/id_rsa"),
-            "id_rsa should still be sensitive");
+        assert!(
+            !checker.is_sensitive_path("/home/user/.ssh/known_hosts"),
+            "known_hosts should not be sensitive when overridden"
+        );
+        assert!(
+            checker.is_sensitive_path("/home/user/.ssh/id_rsa"),
+            "id_rsa should still be sensitive"
+        );
     }
 }

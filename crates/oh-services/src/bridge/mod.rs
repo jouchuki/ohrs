@@ -53,11 +53,8 @@ impl BridgeManager {
         let ohrs_bin = std::env::current_exe()
             .ok()
             .unwrap_or_else(|| std::path::PathBuf::from("ohrs"));
-        self.spawn_command_internal(
-            &[ohrs_bin.to_string_lossy().as_ref(), "-p", prompt],
-            cwd,
-        )
-        .await
+        self.spawn_command_internal(&[ohrs_bin.to_string_lossy().as_ref(), "-p", prompt], cwd)
+            .await
     }
 
     /// Testable variant: accepts an explicit argv slice.
@@ -202,13 +199,11 @@ impl BridgeManager {
         records
     }
 
-    pub async fn get_output(
-        &self,
-        id: &str,
-        max_lines: usize,
-    ) -> Result<Vec<String>, BridgeError> {
+    pub async fn get_output(&self, id: &str, max_lines: usize) -> Result<Vec<String>, BridgeError> {
         let map = self.sessions.read().await;
-        let state = map.get(id).ok_or_else(|| BridgeError::NotFound(id.into()))?;
+        let state = map
+            .get(id)
+            .ok_or_else(|| BridgeError::NotFound(id.into()))?;
         let buf = &state.output_buf;
         let skip = buf.len().saturating_sub(max_lines);
         Ok(buf.iter().skip(skip).cloned().collect())
@@ -321,7 +316,6 @@ fn now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     fn test_config() -> BridgeConfig {
         BridgeConfig {
@@ -421,7 +415,10 @@ mod tests {
     fn test_generate_work_secret_length() {
         let ws = generate_work_secret();
         assert_eq!(ws.session_ingress_token.len(), 64);
-        assert!(ws.session_ingress_token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(ws
+            .session_ingress_token
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

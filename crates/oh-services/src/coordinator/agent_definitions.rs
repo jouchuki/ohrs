@@ -48,7 +48,6 @@ pub enum ToolPolicy {
     },
 }
 
-
 /// How the agent should be isolated from the parent process.
 /// Maps to Python `isolation` field with values `"worktree"` | `"remote"` plus
 /// a Rust-native `Subprocess` variant.

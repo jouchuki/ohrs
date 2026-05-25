@@ -115,38 +115,36 @@ impl SubagentRunner for EngineSubagentRunner {
 
         // Build the hook executor for the child: the parent's executor plus a
         // trajectory recorder (when a session store is available).
-        let hook_executor: Option<Arc<dyn HookExecutorTrait>> = match (
-            &self.hook_executor,
-            &self.session_store,
-        ) {
-            (Some(parent), Some(store)) => {
-                // Create the child session row so recorded messages have a home.
-                let rec = SessionRecord {
-                    id: child_session_id.clone(),
-                    name: None,
-                    project_root: self.cwd.clone(),
-                    model: req.model.clone().unwrap_or_else(|| self.model.clone()),
-                    created_at: SystemTime::now(),
-                    updated_at: SystemTime::now(),
-                    message_count: 0,
-                    status: SessionStatus::Active,
-                    parent_session_id: self.parent_session_id.clone(),
-                };
-                if let Err(e) = store.create_session(&rec).await {
-                    tracing::warn!("subagent: failed to create child session: {e}");
+        let hook_executor: Option<Arc<dyn HookExecutorTrait>> =
+            match (&self.hook_executor, &self.session_store) {
+                (Some(parent), Some(store)) => {
+                    // Create the child session row so recorded messages have a home.
+                    let rec = SessionRecord {
+                        id: child_session_id.clone(),
+                        name: None,
+                        project_root: self.cwd.clone(),
+                        model: req.model.clone().unwrap_or_else(|| self.model.clone()),
+                        created_at: SystemTime::now(),
+                        updated_at: SystemTime::now(),
+                        message_count: 0,
+                        status: SessionStatus::Active,
+                        parent_session_id: self.parent_session_id.clone(),
+                    };
+                    if let Err(e) = store.create_session(&rec).await {
+                        tracing::warn!("subagent: failed to create child session: {e}");
+                    }
+                    let recorder: Arc<dyn HookExecutorTrait> = Arc::new(TrajectoryRecorder::new(
+                        Arc::clone(store),
+                        child_session_id.clone(),
+                    ));
+                    Some(Arc::new(FanoutHookExecutor {
+                        parent: Arc::clone(parent),
+                        recorder,
+                    }))
                 }
-                let recorder: Arc<dyn HookExecutorTrait> = Arc::new(TrajectoryRecorder::new(
-                    Arc::clone(store),
-                    child_session_id.clone(),
-                ));
-                Some(Arc::new(FanoutHookExecutor {
-                    parent: Arc::clone(parent),
-                    recorder,
-                }))
-            }
-            (Some(parent), None) => Some(Arc::clone(parent)),
-            _ => None,
-        };
+                (Some(parent), None) => Some(Arc::clone(parent)),
+                _ => None,
+            };
 
         let registry = Self::child_registry(&allowed_tools);
 
@@ -178,7 +176,9 @@ impl SubagentRunner for EngineSubagentRunner {
             tasks: None,
         };
 
-        run_subagent(ctx, req.prompt).await.map_err(|e| e.to_string())
+        run_subagent(ctx, req.prompt)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -209,11 +209,13 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text(TextBlock::new(self.text.clone()))],
             };
-            let events = vec![Ok(ApiStreamEvent::MessageComplete(ApiMessageCompleteEvent {
-                message: msg,
-                usage: UsageSnapshot::default(),
-                stop_reason: Some("end_turn".into()),
-            }))];
+            let events = vec![Ok(ApiStreamEvent::MessageComplete(
+                ApiMessageCompleteEvent {
+                    message: msg,
+                    usage: UsageSnapshot::default(),
+                    stop_reason: Some("end_turn".into()),
+                },
+            ))];
             Ok(Box::pin(futures::stream::iter(events)))
         }
     }

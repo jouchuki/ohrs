@@ -82,7 +82,9 @@ mod tests {
 
     async fn ctx_with_completed_task() -> (ToolExecutionContext, String) {
         let mgr = Arc::new(BackgroundTaskManager::new());
-        let record = mgr.create_shell_task("echo task-output-xyz", "t", "/tmp").await;
+        let record = mgr
+            .create_shell_task("echo task-output-xyz", "t", "/tmp")
+            .await;
         // Poll for completion so the log is populated.
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -124,9 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_id() {
-        let result = TaskOutputTool
-            .execute(serde_json::json!({}), &ctx())
-            .await;
+        let result = TaskOutputTool.execute(serde_json::json!({}), &ctx()).await;
         assert!(result.is_error);
         assert!(result.output.contains("id"));
     }
@@ -154,10 +154,7 @@ mod tests {
     async fn test_success_with_custom_max_bytes() {
         let (context, id) = ctx_with_completed_task().await;
         let result = TaskOutputTool
-            .execute(
-                serde_json::json!({"id": id, "max_bytes": 5000}),
-                &context,
-            )
+            .execute(serde_json::json!({"id": id, "max_bytes": 5000}), &context)
             .await;
         assert!(!result.is_error);
     }

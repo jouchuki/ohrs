@@ -57,14 +57,8 @@ impl HookExecutor {
     ) -> HookResult {
         let command = inject_arguments(&hook.command, payload);
         let mut env_vars = std::collections::HashMap::new();
-        env_vars.insert(
-            "OPENHARNESS_HOOK_EVENT".to_string(),
-            event.to_string(),
-        );
-        env_vars.insert(
-            "OPENHARNESS_HOOK_PAYLOAD".to_string(),
-            payload.to_string(),
-        );
+        env_vars.insert("OPENHARNESS_HOOK_EVENT".to_string(), event.to_string());
+        env_vars.insert("OPENHARNESS_HOOK_PAYLOAD".to_string(), payload.to_string());
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(hook.timeout_seconds as u64),
@@ -79,10 +73,8 @@ impl HookExecutor {
 
                 match output {
                     Ok(output) => {
-                        let stdout =
-                            String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        let stderr =
-                            String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                         let combined = [stdout, stderr]
                             .iter()
                             .filter(|s| !s.is_empty())
@@ -95,11 +87,7 @@ impl HookExecutor {
                             success,
                             output: combined.clone(),
                             blocked: hook.block_on_failure && !success,
-                            reason: if success {
-                                String::new()
-                            } else {
-                                combined
-                            },
+                            reason: if success { String::new() } else { combined },
                             metadata: {
                                 let mut m = HashMap::new();
                                 m.insert(
@@ -129,10 +117,7 @@ impl HookExecutor {
                 hook_type: "command".into(),
                 success: false,
                 blocked: hook.block_on_failure,
-                reason: format!(
-                    "command hook timed out after {}s",
-                    hook.timeout_seconds
-                ),
+                reason: format!("command hook timed out after {}s", hook.timeout_seconds),
                 ..Default::default()
             },
         }
@@ -223,9 +208,7 @@ impl HookExecutor {
         }
 
         let request = ApiMessageRequest {
-            model: model
-                .unwrap_or(&self.context.default_model)
-                .to_string(),
+            model: model.unwrap_or(&self.context.default_model).to_string(),
             messages: vec![ConversationMessage::from_user_text(&prompt)],
             system_prompt: Some(system),
             max_tokens: 512,
@@ -270,11 +253,7 @@ impl HookExecutor {
         };
 
         let parsed = parse_hook_json(&text);
-        if parsed
-            .get("ok")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
+        if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             HookResult {
                 hook_type: hook_type.into(),
                 success: true,
@@ -300,11 +279,7 @@ impl HookExecutor {
 
 #[async_trait]
 impl HookExecutorTrait for HookExecutor {
-    async fn execute(
-        &self,
-        event: HookEvent,
-        payload: serde_json::Value,
-    ) -> AggregatedHookResult {
+    async fn execute(&self, event: HookEvent, payload: serde_json::Value) -> AggregatedHookResult {
         let registry = self.registry.read().await;
         let hooks = registry.get(&event);
         let mut results = Vec::new();
@@ -324,12 +299,8 @@ impl HookExecutorTrait for HookExecutor {
 
             let result = async {
                 match hook {
-                    HookDefinition::Command(h) => {
-                        self.run_command_hook(h, event, &payload).await
-                    }
-                    HookDefinition::Http(h) => {
-                        self.run_http_hook(h, event, &payload).await
-                    }
+                    HookDefinition::Command(h) => self.run_command_hook(h, event, &payload).await,
+                    HookDefinition::Http(h) => self.run_http_hook(h, event, &payload).await,
                     HookDefinition::Prompt(h) => {
                         self.run_prompt_hook(
                             &h.prompt,
@@ -369,10 +340,8 @@ impl HookExecutorTrait for HookExecutor {
             );
 
             if result.blocked {
-                oh_telemetry::HOOK_BLOCKED_COUNT.add(
-                    1,
-                    &[KeyValue::new("event", event.to_string())],
-                );
+                oh_telemetry::HOOK_BLOCKED_COUNT
+                    .add(1, &[KeyValue::new("event", event.to_string())]);
             }
 
             results.push(result);
@@ -470,7 +439,10 @@ mod tests {
     fn test_parse_hook_json_ok_false_with_reason() {
         let result = parse_hook_json(r#"{"ok": false, "reason": "denied"}"#);
         assert_eq!(result.get("ok").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(result.get("reason").and_then(|v| v.as_str()), Some("denied"));
+        assert_eq!(
+            result.get("reason").and_then(|v| v.as_str()),
+            Some("denied")
+        );
     }
 
     // -- command hook execution tests --
@@ -478,7 +450,10 @@ mod tests {
     #[tokio::test]
     async fn test_command_hook_echo_success() {
         let mut reg = HookRegistry::new();
-        reg.register(HookEvent::PreToolUse, make_command_hook("/bin/echo hello", 30, false));
+        reg.register(
+            HookEvent::PreToolUse,
+            make_command_hook("/bin/echo hello", 30, false),
+        );
         let executor = make_executor(reg);
 
         let result = executor
@@ -513,10 +488,7 @@ mod tests {
     #[tokio::test]
     async fn test_command_hook_failure_no_block() {
         let mut reg = HookRegistry::new();
-        reg.register(
-            HookEvent::PreToolUse,
-            make_command_hook("exit 1", 5, false),
-        );
+        reg.register(HookEvent::PreToolUse, make_command_hook("exit 1", 5, false));
         let executor = make_executor(reg);
 
         let result = executor

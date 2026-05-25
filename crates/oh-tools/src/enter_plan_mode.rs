@@ -50,6 +50,9 @@ mod tests {
         let result = tool.execute(serde_json::json!({}), &ctx).await;
         assert!(!result.is_error);
         assert_eq!(result.output, "Entered plan mode.");
-        assert_eq!(result.metadata.get("plan_mode"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            result.metadata.get("plan_mode"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 }

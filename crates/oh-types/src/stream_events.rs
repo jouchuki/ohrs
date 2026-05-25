@@ -48,11 +48,13 @@ pub enum StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::{ConversationMessage, Role, ContentBlock, TextBlock};
+    use crate::messages::{ContentBlock, ConversationMessage, Role, TextBlock};
 
     #[test]
     fn test_assistant_text_delta_clone() {
-        let delta = AssistantTextDelta { text: "hello".into() };
+        let delta = AssistantTextDelta {
+            text: "hello".into(),
+        };
         let cloned = delta.clone();
         assert_eq!(cloned.text, "hello");
     }
@@ -64,7 +66,11 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text(TextBlock::new("done"))],
             },
-            usage: UsageSnapshot { input_tokens: 10, output_tokens: 20, ..Default::default() },
+            usage: UsageSnapshot {
+                input_tokens: 10,
+                output_tokens: 20,
+                ..Default::default()
+            },
         };
         assert_eq!(turn.usage.total_tokens(), 30);
         assert_eq!(turn.message.text(), "done");

@@ -69,7 +69,11 @@ impl crate::traits::Tool for AskUserQuestionTool {
             return ToolResult::error("questions array must not be empty");
         }
 
-        if questions[0].get("question").and_then(|v| v.as_str()).is_none() {
+        if questions[0]
+            .get("question")
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
             return ToolResult::error("First question object must have a 'question' field");
         }
 
@@ -87,9 +91,7 @@ impl crate::traits::Tool for AskUserQuestionTool {
         }
 
         // Non-interactive mode — no user prompt callback available.
-        ToolResult::success(
-            "No user prompt available — running in non-interactive mode.",
-        )
+        ToolResult::success("No user prompt available — running in non-interactive mode.")
     }
 }
 
@@ -154,10 +156,9 @@ mod tests {
     async fn test_with_ask_user_prompt_in_metadata() {
         let tool = AskUserQuestionTool;
         let mut context = ctx();
-        context.metadata.insert(
-            "ask_user_prompt".to_string(),
-            serde_json::json!("Alice"),
-        );
+        context
+            .metadata
+            .insert("ask_user_prompt".to_string(), serde_json::json!("Alice"));
         let result = tool
             .execute(
                 serde_json::json!({

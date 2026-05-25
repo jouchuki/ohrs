@@ -83,9 +83,7 @@ impl crate::traits::Tool for WebFetchTool {
         let final_url = response.url().to_string();
 
         if !response.status().is_success() {
-            return ToolResult::error(format!(
-                "HTTP error: status {status} for URL {url}"
-            ));
+            return ToolResult::error(format!("HTTP error: status {status} for URL {url}"));
         }
 
         let body_text = match response.text().await {
@@ -221,6 +219,9 @@ mod tests {
     #[test]
     fn test_is_read_only() {
         let tool = WebFetchTool;
-        assert!(crate::traits::Tool::is_read_only(&tool, &serde_json::json!({})));
+        assert!(crate::traits::Tool::is_read_only(
+            &tool,
+            &serde_json::json!({})
+        ));
     }
 }

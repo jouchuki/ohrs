@@ -1,9 +1,9 @@
 //! Plugin loading: dylib (.so/.dll) and JSON/markdown (static) plugins.
 
 pub mod discovery;
-pub mod json_loader;
 pub mod dylib_loader;
 pub mod installer;
+pub mod json_loader;
 
 pub use oh_types::plugin::LoadedPlugin;
 
@@ -11,10 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Load all plugins from user and project directories.
-pub fn load_all_plugins(
-    cwd: &Path,
-    enabled_plugins: &HashMap<String, bool>,
-) -> Vec<LoadedPlugin> {
+pub fn load_all_plugins(cwd: &Path, enabled_plugins: &HashMap<String, bool>) -> Vec<LoadedPlugin> {
     let paths = discovery::discover_plugin_paths(cwd);
     let mut plugins = Vec::new();
 

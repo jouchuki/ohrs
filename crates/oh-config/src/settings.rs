@@ -241,11 +241,7 @@ pub fn builtin_profiles() -> Vec<ProviderProfile> {
             // Client appends /v1/chat/completions, so base_url must not include /v1.
             base_url: "https://api.openai.com".into(),
             auth_env_vars: vec!["OPENAI_API_KEY".into()],
-            models: vec![
-                "gpt-5.4".into(),
-                "gpt-4o".into(),
-                "o3".into(),
-            ],
+            models: vec!["gpt-5.4".into(), "gpt-4o".into(), "o3".into()],
             context_window_tokens: Some(128_000),
             auto_compact_threshold_tokens: Some(100_000),
         },
@@ -621,9 +617,10 @@ pub fn apply_env_overrides(settings: Settings) -> Settings {
     }
 
     // Permission mode override
-    if let Some(mode_str) =
-        env_with_fallback("OPENHARNESSRS_PERMISSION_MODE", "OPENHARNESS_PERMISSION_MODE")
-    {
+    if let Some(mode_str) = env_with_fallback(
+        "OPENHARNESSRS_PERMISSION_MODE",
+        "OPENHARNESS_PERMISSION_MODE",
+    ) {
         match mode_str.to_lowercase().as_str() {
             "default" => s.permission.mode = PermissionMode::Default,
             "plan" => s.permission.mode = PermissionMode::Plan,
@@ -662,9 +659,10 @@ pub fn apply_env_overrides(settings: Settings) -> Settings {
     }
 
     // Config readonly flag
-    if let Some(readonly_str) =
-        env_with_fallback("OPENHARNESSRS_CONFIG_READONLY", "OPENHARNESS_CONFIG_READONLY")
-    {
+    if let Some(readonly_str) = env_with_fallback(
+        "OPENHARNESSRS_CONFIG_READONLY",
+        "OPENHARNESS_CONFIG_READONLY",
+    ) {
         s.config_readonly = matches!(readonly_str.as_str(), "true" | "1");
     }
 
@@ -682,8 +680,7 @@ pub fn load_settings(config_path: Option<&Path>) -> Result<Settings, SettingsErr
     let (path, from_env) = match config_path {
         Some(p) => (p.to_path_buf(), false),
         None => {
-            if let Some(env_path) =
-                env_with_fallback("OPENHARNESSRS_CONFIG", "OPENHARNESS_CONFIG")
+            if let Some(env_path) = env_with_fallback("OPENHARNESSRS_CONFIG", "OPENHARNESS_CONFIG")
             {
                 (PathBuf::from(env_path), true)
             } else {
@@ -693,10 +690,9 @@ pub fn load_settings(config_path: Option<&Path>) -> Result<Settings, SettingsErr
     };
 
     let mut settings = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| SettingsError::IoError(e.to_string()))?;
-        serde_json::from_str(&raw)
-            .map_err(|e| SettingsError::ParseError(e.to_string()))?
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| SettingsError::IoError(e.to_string()))?;
+        serde_json::from_str(&raw).map_err(|e| SettingsError::ParseError(e.to_string()))?
     } else {
         Settings::default()
     };
@@ -717,8 +713,7 @@ pub fn save_settings(settings: &Settings, config_path: Option<&Path>) -> Result<
     };
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| SettingsError::IoError(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| SettingsError::IoError(e.to_string()))?;
     }
 
     let json = serde_json::to_string_pretty(settings)
@@ -795,7 +790,9 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_from_env() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Safety: we use a unique env var name scheme and clean up.
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-env-456") };
         let s = Settings::default();
@@ -806,7 +803,9 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_instance_takes_precedence_over_env() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-env-456") };
         let s = Settings {
             api_key: "sk-instance-789".into(),
@@ -819,7 +818,9 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_missing_returns_error() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
         let s = Settings::default();
         let err = s.resolve_api_key().unwrap_err();
@@ -868,7 +869,9 @@ mod tests {
 
     #[test]
     fn test_load_missing_file_returns_defaults() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Clear env vars that would pollute defaults.
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -887,7 +890,9 @@ mod tests {
 
     #[test]
     fn test_load_existing_file() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("ANTHROPIC_MODEL");
@@ -912,7 +917,9 @@ mod tests {
 
     #[test]
     fn test_save_and_load_roundtrip() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("ANTHROPIC_MODEL");
@@ -946,7 +953,9 @@ mod tests {
 
     #[test]
     fn test_load_with_permission_settings() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("ANTHROPIC_MODEL");
@@ -971,7 +980,9 @@ mod tests {
 
     #[test]
     fn test_apply_env_overrides_anthropic_model() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("OPENHARNESSRS_MODEL");
             std::env::remove_var("ANTHROPIC_BASE_URL");
@@ -987,7 +998,9 @@ mod tests {
 
     #[test]
     fn test_apply_env_overrides_anthropic_base_url() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("OPENHARNESSRS_MODEL");
@@ -1003,7 +1016,9 @@ mod tests {
 
     #[test]
     fn test_apply_env_overrides_api_key() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("OPENHARNESSRS_MODEL");
@@ -1019,7 +1034,9 @@ mod tests {
 
     #[test]
     fn test_apply_env_overrides_max_tokens() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("OPENHARNESSRS_MODEL");
@@ -1071,7 +1088,9 @@ mod tests {
 
     #[test]
     fn test_load_settings_from_openharnessrs_config_env() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mounted.json");
@@ -1085,7 +1104,9 @@ mod tests {
 
     #[test]
     fn test_load_settings_from_openharness_config_env_fallback() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy_mounted.json");
@@ -1099,7 +1120,9 @@ mod tests {
 
     #[test]
     fn test_openharnessrs_config_takes_precedence_over_legacy() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         let dir = tempfile::tempdir().unwrap();
         let primary_path = dir.path().join("primary.json");
@@ -1120,7 +1143,9 @@ mod tests {
 
     #[test]
     fn test_explicit_path_overrides_env_config() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         let dir = tempfile::tempdir().unwrap();
         let env_path = dir.path().join("env.json");
@@ -1138,7 +1163,9 @@ mod tests {
 
     #[test]
     fn test_env_override_permission_mode_full_auto() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_PERMISSION_MODE", "full_auto") };
         let s = apply_env_overrides(Settings::default());
@@ -1148,7 +1175,9 @@ mod tests {
 
     #[test]
     fn test_env_override_permission_mode_plan() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_PERMISSION_MODE", "plan") };
         let s = apply_env_overrides(Settings::default());
@@ -1158,7 +1187,9 @@ mod tests {
 
     #[test]
     fn test_env_override_permission_mode_legacy_fallback() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESS_PERMISSION_MODE", "full_auto") };
         let s = apply_env_overrides(Settings::default());
@@ -1170,7 +1201,9 @@ mod tests {
 
     #[test]
     fn test_env_override_denied_tools() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_DENIED_TOOLS", "Bash,Write,Edit") };
         let s = apply_env_overrides(Settings::default());
@@ -1180,7 +1213,9 @@ mod tests {
 
     #[test]
     fn test_env_override_allowed_tools() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_ALLOWED_TOOLS", "Read, Grep") };
         let s = apply_env_overrides(Settings::default());
@@ -1190,7 +1225,9 @@ mod tests {
 
     #[test]
     fn test_env_override_denied_tools_legacy_fallback() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESS_DENIED_TOOLS", "Bash") };
         let s = apply_env_overrides(Settings::default());
@@ -1202,7 +1239,9 @@ mod tests {
 
     #[test]
     fn test_env_override_hooks() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         let hooks_json = r#"{"PreToolUse": [{"type": "command", "command": "echo pre"}]}"#;
         unsafe { std::env::set_var("OPENHARNESSRS_HOOKS", hooks_json) };
@@ -1214,7 +1253,9 @@ mod tests {
 
     #[test]
     fn test_env_override_hooks_invalid_json_ignored() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_HOOKS", "not valid json") };
         let s = apply_env_overrides(Settings::default());
@@ -1226,7 +1267,9 @@ mod tests {
 
     #[test]
     fn test_env_override_config_readonly_true() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_CONFIG_READONLY", "true") };
         let s = apply_env_overrides(Settings::default());
@@ -1236,7 +1279,9 @@ mod tests {
 
     #[test]
     fn test_env_override_config_readonly_1() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_CONFIG_READONLY", "1") };
         let s = apply_env_overrides(Settings::default());
@@ -1246,7 +1291,9 @@ mod tests {
 
     #[test]
     fn test_env_override_config_readonly_false() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESSRS_CONFIG_READONLY", "false") };
         let s = apply_env_overrides(Settings::default());
@@ -1256,7 +1303,9 @@ mod tests {
 
     #[test]
     fn test_env_override_config_readonly_legacy_fallback() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_all_env_vars();
         unsafe { std::env::set_var("OPENHARNESS_CONFIG_READONLY", "true") };
         let s = apply_env_overrides(Settings::default());

@@ -1,4 +1,4 @@
-use oh_swarm::{InProcessBackend, TeamManager, TeamId, TeammateConfig, TeammateId};
+use oh_swarm::{InProcessBackend, TeamId, TeamManager, TeammateConfig, TeammateId};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -126,8 +126,12 @@ async fn teammates_exchange_messages_via_mailbox() {
         })
     };
 
-    mgr.add_member(&team, sender_id.clone(), sender_cfg).await.unwrap();
-    mgr.add_member(&team, TeammateId::new("receiver"), receiver_cfg).await.unwrap();
+    mgr.add_member(&team, sender_id.clone(), sender_cfg)
+        .await
+        .unwrap();
+    mgr.add_member(&team, TeammateId::new("receiver"), receiver_cfg)
+        .await
+        .unwrap();
 
     // Allow tasks time to run.
     sleep(Duration::from_millis(300)).await;

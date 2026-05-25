@@ -51,7 +51,12 @@ mod tests {
 
     #[test]
     fn test_task_type_serde_roundtrip() {
-        for tt in [TaskType::LocalBash, TaskType::LocalAgent, TaskType::RemoteAgent, TaskType::InProcessTeammate] {
+        for tt in [
+            TaskType::LocalBash,
+            TaskType::LocalAgent,
+            TaskType::RemoteAgent,
+            TaskType::InProcessTeammate,
+        ] {
             let json = serde_json::to_string(&tt).unwrap();
             let deser: TaskType = serde_json::from_str(&json).unwrap();
             assert_eq!(deser, tt);
@@ -60,13 +65,25 @@ mod tests {
 
     #[test]
     fn test_task_type_serde_values() {
-        assert_eq!(serde_json::to_string(&TaskType::LocalBash).unwrap(), "\"local_bash\"");
-        assert_eq!(serde_json::to_string(&TaskType::InProcessTeammate).unwrap(), "\"in_process_teammate\"");
+        assert_eq!(
+            serde_json::to_string(&TaskType::LocalBash).unwrap(),
+            "\"local_bash\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskType::InProcessTeammate).unwrap(),
+            "\"in_process_teammate\""
+        );
     }
 
     #[test]
     fn test_task_status_serde_roundtrip() {
-        for status in [TaskStatus::Pending, TaskStatus::Running, TaskStatus::Completed, TaskStatus::Failed, TaskStatus::Killed] {
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::Running,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Killed,
+        ] {
             let json = serde_json::to_string(&status).unwrap();
             let deser: TaskStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(deser, status);

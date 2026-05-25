@@ -17,15 +17,15 @@ use tokio::sync::Mutex;
 use tracing::{info, info_span, warn, Instrument};
 
 use rmcp::{
-    ClientHandler,
-    model::{
-        CallToolRequestParams, ReadResourceRequestParams, ResourceContents, RawContent,
-    },
-    service::{Peer, RoleClient, RunningService, serve_client},
+    model::{CallToolRequestParams, RawContent, ReadResourceRequestParams, ResourceContents},
+    service::{serve_client, Peer, RoleClient, RunningService},
     transport::{
+        streamable_http_client::{
+            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+        },
         TokioChildProcess,
-        streamable_http_client::{StreamableHttpClientTransport, StreamableHttpClientTransportConfig},
     },
+    ClientHandler,
 };
 
 // ---------------------------------------------------------------------------
@@ -81,10 +81,9 @@ where
     E: std::error::Error + Send + Sync + 'static,
     A: Send + 'static,
 {
-    let running: RunningService<RoleClient, NoopHandler> =
-        serve_client(NoopHandler, transport)
-            .await
-            .map_err(|e| map_rmcp_error(format!("initialize failed: {e}"), &e.to_string()))?;
+    let running: RunningService<RoleClient, NoopHandler> = serve_client(NoopHandler, transport)
+        .await
+        .map_err(|e| map_rmcp_error(format!("initialize failed: {e}"), &e.to_string()))?;
 
     let peer = running.peer().clone();
     let cancel = running.cancellation_token();
@@ -236,7 +235,12 @@ impl McpClientManager {
                             url = %cfg.url,
                             "WebSocket MCP transport not yet implemented in rmcp"
                         );
-                        ("ws", Err(McpError::NotImplemented("WebSocket transport not yet supported by rmcp".into())))
+                        (
+                            "ws",
+                            Err(McpError::NotImplemented(
+                                "WebSocket transport not yet supported by rmcp".into(),
+                            )),
+                        )
                     }
                 }
             }
@@ -347,10 +351,9 @@ impl McpClientManager {
             };
 
             let peer = session.peer.lock().await;
-            let call_result = peer
-                .call_tool(params)
-                .await
-                .map_err(|e| map_rmcp_error(format!("call_tool '{tool_name}': {e}"), &e.to_string()))?;
+            let call_result = peer.call_tool(params).await.map_err(|e| {
+                map_rmcp_error(format!("call_tool '{tool_name}': {e}"), &e.to_string())
+            })?;
 
             // Concatenate all text content blocks. Non-text blocks are JSON-serialized
             // so callers always receive a plain string.
@@ -399,11 +402,7 @@ impl McpClientManager {
     ///
     /// Text resources are returned as-is. Blob resources are described with
     /// their URI and base64 length (the caller can further decode if needed).
-    pub async fn read_resource(
-        &self,
-        server_name: &str,
-        uri: &str,
-    ) -> Result<String, McpError> {
+    pub async fn read_resource(&self, server_name: &str, uri: &str) -> Result<String, McpError> {
         let session = self
             .connected
             .get(server_name)
@@ -724,10 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_resource_returns_not_connected() {
         let mgr = McpClientManager::new(HashMap::new());
-        let err = mgr
-            .read_resource("ghost", "file:///foo")
-            .await
-            .unwrap_err();
+        let err = mgr.read_resource("ghost", "file:///foo").await.unwrap_err();
         assert!(matches!(err, McpError::NotConnected(_)));
     }
 
@@ -759,7 +755,10 @@ mod tests {
         let statuses = mgr.connect_all().await;
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, McpConnectionState::Failed);
-        assert!(!statuses[0].detail.is_empty(), "detail should contain the error");
+        assert!(
+            !statuses[0].detail.is_empty(),
+            "detail should contain the error"
+        );
     }
 
     #[tokio::test]

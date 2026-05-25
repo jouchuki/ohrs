@@ -2,10 +2,7 @@
 //!
 //! Memory files are Markdown with YAML frontmatter; `MEMORY.md` is the index.
 
-use std::{
-    path::PathBuf,
-    time::SystemTime,
-};
+use std::{path::PathBuf, time::SystemTime};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -43,19 +40,19 @@ pub enum MemoryType {
 impl MemoryType {
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "user"      => Self::User,
-            "feedback"  => Self::Feedback,
-            "project"   => Self::Project,
+            "user" => Self::User,
+            "feedback" => Self::Feedback,
+            "project" => Self::Project,
             "reference" => Self::Reference,
-            _           => Self::User,
+            _ => Self::User,
         }
     }
 
     fn as_str(&self) -> &'static str {
         match self {
-            Self::User      => "user",
-            Self::Feedback  => "feedback",
-            Self::Project   => "project",
+            Self::User => "user",
+            Self::Feedback => "feedback",
+            Self::Project => "project",
             Self::Reference => "reference",
         }
     }
@@ -63,12 +60,12 @@ impl MemoryType {
 
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
-    pub name:        String,
-    pub title:       String,
+    pub name: String,
+    pub title: String,
     pub description: String,
     pub memory_type: MemoryType,
-    pub path:        PathBuf,
-    pub modified:    SystemTime,
+    pub path: PathBuf,
+    pub modified: SystemTime,
 }
 
 // ── Internal frontmatter serde helper ─────────────────────────────────────────
@@ -140,8 +137,8 @@ impl MemoryStore {
         let modified = fs::metadata(&path).await?.modified()?;
         let (fm, body) = split_frontmatter(&raw);
         let entry = MemoryEntry {
-            name:        name.to_owned(),
-            title:       fm.name.clone(),
+            name: name.to_owned(),
+            title: fm.name.clone(),
             description: fm.description.clone(),
             memory_type: MemoryType::from_str(&fm.memory_type),
             path,
@@ -155,7 +152,9 @@ impl MemoryStore {
     /// Return all entries sorted by modification time desc, then name asc for
     /// determinism when multiple files share the same mtime.
     pub async fn list(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
-        self.list_with_bodies().await.map(|v| v.into_iter().map(|(e, _)| e).collect())
+        self.list_with_bodies()
+            .await
+            .map(|v| v.into_iter().map(|(e, _)| e).collect())
     }
 
     // ── search ────────────────────────────────────────────────────────────────
@@ -204,7 +203,10 @@ impl MemoryStore {
         let entries = self.list().await?;
         let mut lines = vec!["# Memory Index".to_owned()];
         for e in &entries {
-            lines.push(format!("- [{}]({}.md) — {}", e.title, e.name, e.description));
+            lines.push(format!(
+                "- [{}]({}.md) — {}",
+                e.title, e.name, e.description
+            ));
         }
         lines.push(String::new()); // trailing newline
         let content = lines.join("\n");
@@ -242,11 +244,15 @@ impl MemoryStore {
                 }
             };
             let modified = meta.modified()?;
-            let name = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let name = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             let (fm, body) = split_frontmatter(&raw);
             let entry = MemoryEntry {
                 name,
-                title:       fm.name,
+                title: fm.name,
                 description: fm.description,
                 memory_type: MemoryType::from_str(&fm.memory_type),
                 path: p,
@@ -258,7 +264,9 @@ impl MemoryStore {
         // Primary: newest mtime first. Secondary: name ascending for determinism
         // when multiple entries share the same mtime (e.g. in fast tests).
         pairs.sort_by(|(a, _), (b, _)| {
-            b.modified.cmp(&a.modified).then_with(|| a.name.cmp(&b.name))
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| a.name.cmp(&b.name))
         });
         Ok(pairs)
     }
@@ -319,7 +327,11 @@ fn split_frontmatter(raw: &str) -> (Frontmatter, String) {
 }
 
 fn default_fm() -> Frontmatter {
-    Frontmatter { name: String::new(), description: String::new(), memory_type: String::new() }
+    Frontmatter {
+        name: String::new(),
+        description: String::new(),
+        memory_type: String::new(),
+    }
 }
 
 /// Serialise an entry + body into the on-disk file format.
@@ -380,12 +392,12 @@ mod tests {
 
     fn sample_entry(name: &str) -> MemoryEntry {
         MemoryEntry {
-            name:        name.to_owned(),
-            title:       "Test Title".to_owned(),
+            name: name.to_owned(),
+            title: "Test Title".to_owned(),
             description: "A short description".to_owned(),
             memory_type: MemoryType::User,
-            path:        PathBuf::new(),
-            modified:    SystemTime::UNIX_EPOCH,
+            path: PathBuf::new(),
+            modified: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -440,8 +452,17 @@ mod tests {
     #[tokio::test]
     async fn search_returns_excerpts() {
         let (_dir, store) = tmp_store();
-        store.save(&sample_entry("note_a"), "Rust is great\nC++ is fast\nGo is simple").await.unwrap();
-        store.save(&sample_entry("note_b"), "Python is easy\nRuby is fun").await.unwrap();
+        store
+            .save(
+                &sample_entry("note_a"),
+                "Rust is great\nC++ is fast\nGo is simple",
+            )
+            .await
+            .unwrap();
+        store
+            .save(&sample_entry("note_b"), "Python is easy\nRuby is fun")
+            .await
+            .unwrap();
 
         let re = Regex::new(r"(?i)rust").unwrap();
         let results = store.search(&re).await.unwrap();
@@ -453,7 +474,10 @@ mod tests {
     #[tokio::test]
     async fn search_no_match() {
         let (_dir, store) = tmp_store();
-        store.save(&sample_entry("quiet"), "silence is golden").await.unwrap();
+        store
+            .save(&sample_entry("quiet"), "silence is golden")
+            .await
+            .unwrap();
         let re = Regex::new(r"noise").unwrap();
         let results = store.search(&re).await.unwrap();
         assert!(results.is_empty());
@@ -464,11 +488,19 @@ mod tests {
     #[tokio::test]
     async fn rebuild_index_contains_all_entries() {
         let (_dir, store) = tmp_store();
-        store.save(&sample_entry("entry_one"), "body 1").await.unwrap();
-        store.save(&sample_entry("entry_two"), "body 2").await.unwrap();
+        store
+            .save(&sample_entry("entry_one"), "body 1")
+            .await
+            .unwrap();
+        store
+            .save(&sample_entry("entry_two"), "body 2")
+            .await
+            .unwrap();
         store.rebuild_index().await.unwrap();
 
-        let content = fs::read_to_string(store.root.join("MEMORY.md")).await.unwrap();
+        let content = fs::read_to_string(store.root.join("MEMORY.md"))
+            .await
+            .unwrap();
         assert!(content.contains("entry_one.md"));
         assert!(content.contains("entry_two.md"));
         assert!(content.contains("# Memory Index"));
@@ -477,12 +509,22 @@ mod tests {
     #[tokio::test]
     async fn rebuild_index_deterministic() {
         let (_dir, store) = tmp_store();
-        store.save(&sample_entry("z_entry"), "body z").await.unwrap();
-        store.save(&sample_entry("a_entry"), "body a").await.unwrap();
+        store
+            .save(&sample_entry("z_entry"), "body z")
+            .await
+            .unwrap();
+        store
+            .save(&sample_entry("a_entry"), "body a")
+            .await
+            .unwrap();
         store.rebuild_index().await.unwrap();
-        let c1 = fs::read_to_string(store.root.join("MEMORY.md")).await.unwrap();
+        let c1 = fs::read_to_string(store.root.join("MEMORY.md"))
+            .await
+            .unwrap();
         store.rebuild_index().await.unwrap();
-        let c2 = fs::read_to_string(store.root.join("MEMORY.md")).await.unwrap();
+        let c2 = fs::read_to_string(store.root.join("MEMORY.md"))
+            .await
+            .unwrap();
         assert_eq!(c1, c2, "rebuild_index must be idempotent");
     }
 
@@ -491,7 +533,10 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_entry() {
         let (_dir, store) = tmp_store();
-        store.save(&sample_entry("to_remove"), "body").await.unwrap();
+        store
+            .save(&sample_entry("to_remove"), "body")
+            .await
+            .unwrap();
         assert_eq!(store.list().await.unwrap().len(), 1);
         store.delete("to_remove").await.unwrap();
         assert!(store.list().await.unwrap().is_empty());
@@ -509,7 +554,9 @@ mod tests {
     async fn invalid_frontmatter_skipped_gracefully() {
         let (_dir, store) = tmp_store();
         let bad_path = store.root.join("bad.md");
-        fs::write(&bad_path, "---\n: invalid: {{{ yaml\n---\nbody text").await.unwrap();
+        fs::write(&bad_path, "---\n: invalid: {{{ yaml\n---\nbody text")
+            .await
+            .unwrap();
         // Must not panic; entry may be included with empty fields or skipped.
         let _ = store.list().await.unwrap();
     }
@@ -517,8 +564,11 @@ mod tests {
     #[tokio::test]
     async fn crlf_frontmatter_parses_correctly() {
         let (_dir, store) = tmp_store();
-        let content = "---\r\nname: CRLF Entry\r\ndescription: test\r\ntype: project\r\n---\r\nBody here.";
-        fs::write(store.root.join("crlf.md"), content).await.unwrap();
+        let content =
+            "---\r\nname: CRLF Entry\r\ndescription: test\r\ntype: project\r\n---\r\nBody here.";
+        fs::write(store.root.join("crlf.md"), content)
+            .await
+            .unwrap();
         let (entry, body) = store.load("crlf").await.unwrap();
         assert_eq!(entry.title, "CRLF Entry");
         assert_eq!(entry.memory_type, MemoryType::Project);
@@ -529,7 +579,12 @@ mod tests {
     async fn no_closing_delimiter_handled() {
         let (_dir, store) = tmp_store();
         // Frontmatter without a closing `---` — should not crash.
-        fs::write(store.root.join("nocloser.md"), "---\nname: Oops\ndescription: missing close\n").await.unwrap();
+        fs::write(
+            store.root.join("nocloser.md"),
+            "---\nname: Oops\ndescription: missing close\n",
+        )
+        .await
+        .unwrap();
         let _ = store.list().await.unwrap();
     }
 }

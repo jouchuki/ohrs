@@ -12,7 +12,7 @@ use oh_types::messages::ConversationMessage;
 use oh_types::stream_events::StreamEvent;
 
 use crate::cost_tracker::CostTracker;
-use crate::query::{AskUserPromptFn, PermissionPromptFn, QueryContext, run_query};
+use crate::query::{run_query, AskUserPromptFn, PermissionPromptFn, QueryContext};
 
 /// The main query engine — owns conversation history and orchestrates the loop.
 pub struct QueryEngine {
@@ -131,10 +131,7 @@ impl QueryEngine {
         // Fire PreClearHistory hook
         if let Some(ref hook_executor) = self.hook_executor {
             hook_executor
-                .execute(
-                    HookEvent::PreClearHistory,
-                    serde_json::json!({}),
-                )
+                .execute(HookEvent::PreClearHistory, serde_json::json!({}))
                 .await;
         }
 
@@ -144,10 +141,7 @@ impl QueryEngine {
         // Fire PostClearHistory hook
         if let Some(ref hook_executor) = self.hook_executor {
             hook_executor
-                .execute(
-                    HookEvent::PostClearHistory,
-                    serde_json::json!({}),
-                )
+                .execute(HookEvent::PostClearHistory, serde_json::json!({}))
                 .await;
         }
     }
@@ -162,15 +156,30 @@ impl QueryEngine {
         prompt: &str,
     ) -> Result<Vec<(StreamEvent, Option<UsageSnapshot>)>, crate::query::EngineError> {
         if let Some(ref hook_executor) = self.hook_executor {
-            hook_executor.execute(HookEvent::PreUserMessage, serde_json::json!({"prompt": prompt})).await;
-            hook_executor.execute(HookEvent::PrePushMessage, serde_json::json!({"role": "user", "content_type": "text"})).await;
+            hook_executor
+                .execute(
+                    HookEvent::PreUserMessage,
+                    serde_json::json!({"prompt": prompt}),
+                )
+                .await;
+            hook_executor
+                .execute(
+                    HookEvent::PrePushMessage,
+                    serde_json::json!({"role": "user", "content_type": "text"}),
+                )
+                .await;
         }
 
         self.messages
             .push(ConversationMessage::from_user_text(prompt));
 
         if let Some(ref hook_executor) = self.hook_executor {
-            hook_executor.execute(HookEvent::PostPushMessage, serde_json::json!({"role": "user", "content_type": "text"})).await;
+            hook_executor
+                .execute(
+                    HookEvent::PostPushMessage,
+                    serde_json::json!({"role": "user", "content_type": "text"}),
+                )
+                .await;
         }
 
         let context = QueryContext {
@@ -244,7 +253,9 @@ mod tests {
                     message: msg,
                     usage: UsageSnapshot {
                         input_tokens: 10,
-                        output_tokens: 5, ..Default::default() },
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
                     stop_reason: Some("end_turn".into()),
                 },
             ))];
@@ -319,9 +330,9 @@ mod tests {
         let events = engine.submit_message("Hi").await.unwrap();
 
         // Should contain at least one AssistantTurnComplete event
-        let has_complete = events.iter().any(|(e, _)| {
-            matches!(e, StreamEvent::AssistantTurnComplete(_))
-        });
+        let has_complete = events
+            .iter()
+            .any(|(e, _)| matches!(e, StreamEvent::AssistantTurnComplete(_)));
         assert!(has_complete, "expected AssistantTurnComplete event");
     }
 

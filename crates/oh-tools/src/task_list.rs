@@ -126,9 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_manager_not_available() {
-        let result = TaskListTool
-            .execute(serde_json::json!({}), &ctx())
-            .await;
+        let result = TaskListTool.execute(serde_json::json!({}), &ctx()).await;
         assert!(result.is_error);
         assert!(result.output.contains("Task manager not available"));
     }

@@ -63,9 +63,9 @@ impl HookRegistry {
     /// Merge hooks from a map (e.g., from settings or plugins).
     pub fn merge_from_map(&mut self, map: &HashMap<String, Vec<HookDefinition>>) {
         for (event_str, hooks) in map {
-            if let Ok(event) = serde_json::from_value::<HookEvent>(
-                serde_json::Value::String(event_str.clone()),
-            ) {
+            if let Ok(event) =
+                serde_json::from_value::<HookEvent>(serde_json::Value::String(event_str.clone()))
+            {
                 for hook in hooks {
                     self.register(event, hook.clone());
                 }

@@ -91,7 +91,11 @@ mod tests {
 
     #[test]
     fn test_permission_mode_serde_roundtrip() {
-        for mode in [PermissionMode::Default, PermissionMode::Plan, PermissionMode::FullAuto] {
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::FullAuto,
+        ] {
             let json = serde_json::to_string(&mode).unwrap();
             let deser: PermissionMode = serde_json::from_str(&json).unwrap();
             assert_eq!(deser, mode);
@@ -100,9 +104,18 @@ mod tests {
 
     #[test]
     fn test_permission_mode_serde_values() {
-        assert_eq!(serde_json::to_string(&PermissionMode::Default).unwrap(), "\"default\"");
-        assert_eq!(serde_json::to_string(&PermissionMode::Plan).unwrap(), "\"plan\"");
-        assert_eq!(serde_json::to_string(&PermissionMode::FullAuto).unwrap(), "\"full_auto\"");
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::Default).unwrap(),
+            "\"default\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::Plan).unwrap(),
+            "\"plan\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::FullAuto).unwrap(),
+            "\"full_auto\""
+        );
     }
 
     #[test]

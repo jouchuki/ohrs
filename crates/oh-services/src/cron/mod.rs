@@ -20,11 +20,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tokio::{
-    sync::Mutex,
-    task::JoinHandle,
-    time::Instant,
-};
+use tokio::{sync::Mutex, task::JoinHandle, time::Instant};
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -164,15 +160,9 @@ pub fn compute_next_run(
             let expanded = expand_cron_expr(expr);
             let sched = parse_cron_schedule(&expanded, expr)?;
             let now: DateTime<Utc> = SystemTime::now().into();
-            let next = sched
-                .upcoming(Utc)
-                .find(|dt| *dt > now)
-                .ok_or_else(|| {
-                    CronError::BadExpression(
-                        expr.clone(),
-                        "no upcoming fire time found".to_string(),
-                    )
-                })?;
+            let next = sched.upcoming(Utc).find(|dt| *dt > now).ok_or_else(|| {
+                CronError::BadExpression(expr.clone(), "no upcoming fire time found".to_string())
+            })?;
             Ok(chrono_to_system_time(next))
         }
     }
@@ -188,10 +178,7 @@ fn expand_cron_expr(expr: &str) -> String {
     }
 }
 
-fn parse_cron_schedule(
-    expanded: &str,
-    original: &str,
-) -> Result<cron::Schedule, CronError> {
+fn parse_cron_schedule(expanded: &str, original: &str) -> Result<cron::Schedule, CronError> {
     use std::str::FromStr;
     cron::Schedule::from_str(expanded)
         .map_err(|e| CronError::BadExpression(original.to_string(), e.to_string()))
@@ -542,7 +529,12 @@ mod tests {
     impl MockCronRunner {
         fn new() -> (Self, Arc<AtomicUsize>) {
             let counter = Arc::new(AtomicUsize::new(0));
-            (Self { fires: Arc::clone(&counter) }, counter)
+            (
+                Self {
+                    fires: Arc::clone(&counter),
+                },
+                counter,
+            )
         }
     }
 
@@ -629,17 +621,11 @@ mod tests {
     #[test]
     fn test_interval_next_run_no_last() {
         let before = SystemTime::now();
-        let next = compute_next_run(
-            &CronSchedule::Interval(Duration::from_secs(100)),
-            None,
-        )
-        .unwrap();
+        let next =
+            compute_next_run(&CronSchedule::Interval(Duration::from_secs(100)), None).unwrap();
         let after = SystemTime::now();
         // next should be approximately now + 100s
-        let diff = next
-            .duration_since(before)
-            .unwrap()
-            .as_secs();
+        let diff = next.duration_since(before).unwrap().as_secs();
         assert!(diff <= 100);
         let _ = after; // used
     }
@@ -653,7 +639,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            next.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+            next.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
             1_000_300
         );
     }
@@ -767,7 +755,10 @@ mod tests {
             .unwrap_or(Duration::ZERO)
             .as_secs();
         // next_run should still be ~3600s from now, not near-zero
-        assert!(diff > 3000, "Expected next_run still far in future, diff={diff}s");
+        assert!(
+            diff > 3000,
+            "Expected next_run still far in future, diff={diff}s"
+        );
 
         scheduler.stop().await.unwrap();
     }

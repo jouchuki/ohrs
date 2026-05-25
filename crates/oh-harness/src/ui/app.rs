@@ -143,9 +143,7 @@ pub async fn run_tui(
     terminal
         .backend_mut()
         .execute(crossterm::event::DisableMouseCapture)?;
-    terminal
-        .backend_mut()
-        .execute(LeaveAlternateScreen)?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
@@ -234,9 +232,9 @@ async fn event_loop(
                                 process_events(state, &events);
                             }
                             Err(e) => {
-                                state.transcript.push(TranscriptEntry::system(format!(
-                                    "Error: {e}"
-                                )));
+                                state
+                                    .transcript
+                                    .push(TranscriptEntry::system(format!("Error: {e}")));
                             }
                         }
 
@@ -296,12 +294,10 @@ fn process_events(
             }
             StreamEvent::ToolExecutionStarted(started) => {
                 state.current_tool = Some(started.tool_name.clone());
-                state
-                    .transcript
-                    .push(TranscriptEntry::tool_start(
-                        &started.tool_name,
-                        started.tool_input.clone(),
-                    ));
+                state.transcript.push(TranscriptEntry::tool_start(
+                    &started.tool_name,
+                    started.tool_input.clone(),
+                ));
             }
             StreamEvent::ToolExecutionCompleted(completed) => {
                 state.current_tool = None;
