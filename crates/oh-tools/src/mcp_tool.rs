@@ -62,7 +62,7 @@ impl crate::traits::Tool for McpTool {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
 
-        if context.metadata.get("mcp_manager").is_none() {
+        if !context.metadata.contains_key("mcp_manager") {
             return ToolResult::error("MCP manager not available");
         }
 

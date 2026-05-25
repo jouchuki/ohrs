@@ -648,8 +648,7 @@ mod tests {
         // keep_last_n=3: naive split=2 lands on the user+tool_result message.
         // The snap should move it to 1 (before the tool_result), preserving the
         // pair [assistant+tool_use, user+tool_result] together in the kept tail.
-        let mut msgs = Vec::new();
-        msgs.push(text_msg(Role::User, "initial question"));
+        let mut msgs = vec![text_msg(Role::User, "initial question")];
         // assistant with a tool_use
         msgs.push(ConversationMessage {
             role: Role::Assistant,

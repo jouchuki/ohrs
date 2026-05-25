@@ -53,11 +53,11 @@ impl TaskSnapshot {
     pub fn from_record(record: &TaskRecord) -> Self {
         Self {
             id: record.id.clone(),
-            task_type: serde_json::to_value(&record.task_type)
+            task_type: serde_json::to_value(record.task_type)
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_default(),
-            status: serde_json::to_value(&record.status)
+            status: serde_json::to_value(record.status)
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_default(),

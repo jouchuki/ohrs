@@ -484,9 +484,9 @@ data: [DONE]\n";
         // Base delay is 1.0s; each attempt doubles the base.
         // With up to 25% jitter, attempt 0 is in [1.0, 1.25],
         // attempt 1 is in [2.0, 2.5], attempt 2 is in [4.0, 5.0].
-        assert!(d0 >= 1.0 && d0 <= 1.25, "d0 = {d0}");
-        assert!(d1 >= 2.0 && d1 <= 2.5, "d1 = {d1}");
-        assert!(d2 >= 4.0 && d2 <= 5.0, "d2 = {d2}");
+        assert!((1.0..=1.25).contains(&d0), "d0 = {d0}");
+        assert!((2.0..=2.5).contains(&d1), "d1 = {d1}");
+        assert!((4.0..=5.0).contains(&d2), "d2 = {d2}");
         assert!(d1 > d0);
         assert!(d2 > d1);
     }
@@ -495,7 +495,7 @@ data: [DONE]\n";
     fn test_get_retry_delay_capped_at_max() {
         // attempt 10 → 2^10 = 1024, capped at MAX_DELAY_SECS (30)
         let d = get_retry_delay(10);
-        assert!(d >= MAX_DELAY_SECS && d <= MAX_DELAY_SECS * 1.25, "d = {d}");
+        assert!((MAX_DELAY_SECS..=MAX_DELAY_SECS * 1.25).contains(&d), "d = {d}");
     }
 
     // ── AnthropicApiClient::new ─────────────────────────────────────

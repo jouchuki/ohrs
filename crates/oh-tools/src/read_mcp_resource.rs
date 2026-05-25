@@ -53,7 +53,7 @@ impl crate::traits::Tool for ReadMcpResourceTool {
             None => return ToolResult::error("Missing required parameter: uri"),
         };
 
-        if context.metadata.get("mcp_manager").is_none() {
+        if !context.metadata.contains_key("mcp_manager") {
             return ToolResult::error("MCP manager not available");
         }
 

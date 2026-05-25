@@ -70,7 +70,7 @@ fn walk_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with('.'))
+                .is_some_and(|n| n.starts_with('.'))
             {
                 continue;
             }
@@ -194,7 +194,7 @@ impl crate::traits::Tool for GrepTool {
 
         let glob_filter = arguments.get("glob").and_then(|v| v.as_str());
         let type_filter = arguments.get("type").and_then(|v| v.as_str());
-        let type_extensions: Option<Vec<String>> = type_filter.map(|t| type_to_extensions(t));
+        let type_extensions: Option<Vec<String>> = type_filter.map(type_to_extensions);
 
         let files = walk_files(&search_dir);
         let mut output_lines: Vec<String> = Vec::new();
@@ -263,10 +263,11 @@ impl crate::traits::Tool for GrepTool {
                     for &idx in &match_indices {
                         let start = idx.saturating_sub(before);
                         let end = (idx + after + 1).min(all_lines.len());
-                        for i in start..end {
+                        for (i, &line) in
+                            all_lines.iter().enumerate().skip(start).take(end - start)
+                        {
                             if emitted.insert(i) {
                                 let line_no = i + 1;
-                                let line = all_lines[i];
                                 if show_line_numbers {
                                     output_lines.push(format!("{rel_display}:{line_no}:{line}"));
                                 } else {

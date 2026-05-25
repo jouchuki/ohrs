@@ -31,8 +31,10 @@ pub enum AgentDefError {
 /// mutually-exclusive tagged enum for clarity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ToolPolicy {
     /// All tools are permitted (default when the `tools` key is absent).
+    #[default]
     AllowAll,
     /// Only the listed tools are permitted (Python: `tools: [...]`).
     AllowList {
@@ -46,11 +48,6 @@ pub enum ToolPolicy {
     },
 }
 
-impl Default for ToolPolicy {
-    fn default() -> Self {
-        ToolPolicy::AllowAll
-    }
-}
 
 /// How the agent should be isolated from the parent process.
 /// Maps to Python `isolation` field with values `"worktree"` | `"remote"` plus

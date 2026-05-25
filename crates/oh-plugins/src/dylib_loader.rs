@@ -8,7 +8,6 @@ use opentelemetry::KeyValue;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
-use tracing::{info_span, warn, Instrument};
 
 /// Load a native plugin from a directory containing a .so/.dll/.dylib.
 pub fn load_native_plugin(

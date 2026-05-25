@@ -202,6 +202,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 
 /// SQLite-backed session store.
 pub struct SqliteBackend {
+    #[allow(dead_code)]
     db_path: PathBuf,
     conn: Arc<Mutex<Connection>>,
 }

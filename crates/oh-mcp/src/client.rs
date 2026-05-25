@@ -517,7 +517,7 @@ impl McpClientManager {
         let names: Vec<String> = self.connected.keys().cloned().collect();
         let mut failed = Vec::new();
         for name in names {
-            if let Err(_) = self.ping(&name).await {
+            if self.ping(&name).await.is_err() {
                 failed.push(name);
             }
         }

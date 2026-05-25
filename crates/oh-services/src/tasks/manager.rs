@@ -296,7 +296,7 @@ impl BackgroundTaskManager {
         guard
             .tasks
             .values()
-            .filter(|lt| status.map_or(true, |s| lt.record.status == s))
+            .filter(|lt| status.is_none_or(|s| lt.record.status == s))
             .map(|lt| lt.record.clone())
             .collect()
     }
@@ -446,7 +446,7 @@ fn spawn_and_watch(
                         .insert("spawn_error".into(), e.to_string());
                 }
                 oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
-                notify_listeners(&mut *guard, &task_id);
+                notify_listeners(&mut guard, &task_id);
                 return;
             }
         };
@@ -472,7 +472,7 @@ fn spawn_and_watch(
                     lt.record.return_code = Some(-1);
                 }
                 oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
-                notify_listeners(&mut *guard, &task_id);
+                notify_listeners(&mut guard, &task_id);
                 return;
             }
         };
@@ -549,7 +549,7 @@ fn spawn_and_watch(
                         lt.record.ended_at = Some(now());
                     }
                 }
-                notify_listeners(&mut *guard, &task_id);
+                notify_listeners(&mut guard, &task_id);
             }
             _ = kill_rx => {
                 // Kill signal received from stop_task().
@@ -572,7 +572,7 @@ fn spawn_and_watch(
 
                 // Status was already set to Killed in stop_task(); fire listeners.
                 let mut guard = inner.lock().await;
-                notify_listeners(&mut *guard, &task_id);
+                notify_listeners(&mut guard, &task_id);
             }
         }
     })

@@ -46,7 +46,7 @@ impl crate::traits::Tool for TaskUpdateTool {
             None => return ToolResult::error("Missing required parameter: id"),
         };
 
-        if context.metadata.get("task_manager").is_none() {
+        if !context.metadata.contains_key("task_manager") {
             return ToolResult::error("Task manager not available");
         }
 

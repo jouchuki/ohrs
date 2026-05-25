@@ -61,6 +61,7 @@ impl BridgeManager {
     }
 
     /// Testable variant: accepts an explicit argv slice.
+    #[allow(dead_code)]
     pub(crate) async fn spawn_command(
         &self,
         argv: &[&str],
@@ -320,7 +321,7 @@ fn now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    
 
     fn test_config() -> BridgeConfig {
         BridgeConfig {
@@ -335,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_echo_and_get_output() {
         let mgr = BridgeManager::new(test_config());
-        let cwd = PathBuf::from(std::env::temp_dir());
+        let cwd = std::env::temp_dir();
 
         let record = mgr
             .spawn_command(&["echo", "hello bridge"], &cwd)
@@ -363,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_sessions() {
         let mgr = BridgeManager::new(test_config());
-        let cwd = PathBuf::from(std::env::temp_dir());
+        let cwd = std::env::temp_dir();
 
         mgr.spawn_command(&["echo", "a"], &cwd)
             .await
@@ -379,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn test_stop_session() {
         let mgr = BridgeManager::new(test_config());
-        let cwd = PathBuf::from(std::env::temp_dir());
+        let cwd = std::env::temp_dir();
 
         // Use sleep so the process is still alive when we stop it.
         let record = mgr

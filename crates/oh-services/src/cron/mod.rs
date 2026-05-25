@@ -237,9 +237,9 @@ impl CronStore {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 let bytes = tokio::fs::read(&path).await?;
-                match serde_json::from_slice::<CronJob>(&bytes) {
-                    Ok(job) => jobs.push(job),
-                    Err(_) => {} // skip corrupted files
+                // skip corrupted files
+                if let Ok(job) = serde_json::from_slice::<CronJob>(&bytes) {
+                    jobs.push(job);
                 }
             }
         }

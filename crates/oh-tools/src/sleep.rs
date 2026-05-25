@@ -42,8 +42,7 @@ impl crate::traits::Tool for SleepTool {
             .get("seconds")
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0)
-            .min(30.0)
-            .max(0.0);
+            .clamp(0.0, 30.0);
 
         tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
         ToolResult::success(format!("Slept for {seconds} seconds"))

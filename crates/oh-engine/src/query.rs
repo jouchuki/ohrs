@@ -88,7 +88,7 @@ pub async fn run_query(
                 tools: context.tool_registry.to_api_schema(),
             };
 
-            let start = Instant::now();
+            let _start = Instant::now();
             let mut stream = context
                 .api_client
                 .stream_message(request)
@@ -130,7 +130,7 @@ pub async fn run_query(
             })).await;
 
             let final_message = final_message
-                .ok_or_else(|| EngineError::NoResponse)?;
+                .ok_or(EngineError::NoResponse)?;
 
             context.fire_hook(HookEvent::PrePushMessage, serde_json::json!({"role": "assistant", "turn": turn})).await;
             messages.push(final_message.clone());
@@ -211,7 +211,7 @@ pub async fn run_query(
             // Add tool results as user message
             let tool_result_content: Vec<ContentBlock> = tool_results
                 .into_iter()
-                .map(|r| ContentBlock::ToolResult(r))
+                .map(ContentBlock::ToolResult)
                 .collect();
 
             context.fire_hook(HookEvent::PrePushMessage, serde_json::json!({"role": "user", "content_type": "tool_results", "turn": turn})).await;
@@ -460,7 +460,7 @@ async fn apply_hook_action(context: &QueryContext, action: &serde_json::Value) {
                 action.get("event").and_then(|v| v.as_str()),
                 action.get("hook"),
             ) {
-                if let (Ok(event), Ok(hook)) = (
+                if let (Ok(_event), Ok(hook)) = (
                     serde_json::from_value::<HookEvent>(serde_json::Value::String(event_str.to_string())),
                     serde_json::from_value::<oh_types::hooks::HookDefinition>(hook_value.clone()),
                 ) {

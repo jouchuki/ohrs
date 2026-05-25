@@ -186,7 +186,7 @@ fn normalize_result_url(raw_url: &str) -> String {
     if let Ok(parsed) = reqwest::Url::parse(raw_url) {
         if parsed
             .host_str()
-            .map_or(false, |h| h.ends_with("duckduckgo.com"))
+            .is_some_and(|h| h.ends_with("duckduckgo.com"))
             && parsed.path().starts_with("/l/")
         {
             for (key, value) in parsed.query_pairs() {

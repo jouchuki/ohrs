@@ -87,10 +87,10 @@ impl crate::traits::Tool for HookManageTool {
         };
 
         // Get the hook registry from context metadata
-        let registry_handle = context
+        let _registry_handle = context
             .metadata
             .get("hook_registry")
-            .and_then(|v| {
+            .and({
                 // The registry handle is stored as a serialized pointer (set by cli.rs)
                 // We use a different approach: look for it in a global or passed via Arc
                 None::<()>
@@ -122,7 +122,7 @@ impl crate::traits::Tool for HookManageTool {
                 };
 
                 // Validate event name
-                let event: HookEvent = match serde_json::from_value(
+                let _event: HookEvent = match serde_json::from_value(
                     serde_json::Value::String(event_str.to_string()),
                 ) {
                     Ok(e) => e,

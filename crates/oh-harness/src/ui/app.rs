@@ -4,7 +4,7 @@ use std::io::{self, Stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -12,17 +12,17 @@ use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::Terminal;
 
-use oh_api::StreamingApiClient;
 use oh_engine::QueryEngine;
 use oh_hooks::{HookEvent, HookExecutorTrait};
 use oh_types::stream_events::StreamEvent;
 
 use super::input::handle_key;
 use super::render;
-use super::transcript::{TranscriptEntry, TranscriptRole};
+use super::transcript::TranscriptEntry;
 
 /// Modal state.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Permission/Question modals are wired by the not-yet-restored UI chrome.
 pub enum Modal {
     Permission {
         tool_name: String,
@@ -155,7 +155,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     engine: &mut QueryEngine,
-    hook_executor: &Arc<dyn HookExecutorTrait>,
+    _hook_executor: &Arc<dyn HookExecutorTrait>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Poll for events with a short timeout for spinner animation

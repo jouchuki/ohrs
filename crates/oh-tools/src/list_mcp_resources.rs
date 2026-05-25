@@ -40,7 +40,7 @@ impl crate::traits::Tool for ListMcpResourcesTool {
     ) -> ToolResult {
         let _server_filter = arguments.get("server_name").and_then(|v| v.as_str());
 
-        if context.metadata.get("mcp_manager").is_none() {
+        if !context.metadata.contains_key("mcp_manager") {
             return ToolResult::success("No MCP servers connected");
         }
 

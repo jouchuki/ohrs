@@ -116,9 +116,9 @@ fn parse_skill_markdown(default_name: &str, content: &str) -> (String, String) {
     let mut description = String::new();
 
     // Try YAML frontmatter
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            let frontmatter = &content[3..3 + end];
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("---") {
+            let frontmatter = &rest[..end];
             for line in frontmatter.lines() {
                 let line = line.trim();
                 if let Some(val) = line.strip_prefix("name:") {
@@ -157,10 +157,7 @@ fn load_hooks_from_file(path: &Path) -> HashMap<String, Vec<HookDefinition>> {
         Err(_) => return HashMap::new(),
     };
 
-    match serde_json::from_str::<HashMap<String, Vec<HookDefinition>>>(&text) {
-        Ok(hooks) => hooks,
-        Err(_) => HashMap::new(),
-    }
+    serde_json::from_str::<HashMap<String, Vec<HookDefinition>>>(&text).unwrap_or_default()
 }
 
 /// Load MCP configs from a mcp.json file.

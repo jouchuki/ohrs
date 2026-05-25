@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use oh_types::api::{ApiMessageRequest, UsageSnapshot};
+use oh_types::api::ApiMessageRequest;
 use oh_types::hooks::*;
 use oh_types::messages::ConversationMessage;
 use opentelemetry::KeyValue;
 use tokio::sync::RwLock;
-use tracing::{info_span, warn, Instrument};
+use tracing::{info_span, Instrument};
 
 use crate::loader::HookRegistry;
 use crate::matching::{inject_arguments, matches_hook};
@@ -201,6 +201,7 @@ impl HookExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_prompt_hook(
         &self,
         prompt_text: &str,
@@ -208,7 +209,7 @@ impl HookExecutor {
         timeout_seconds: u32,
         block_on_failure: bool,
         agent_mode: bool,
-        event: HookEvent,
+        _event: HookEvent,
         payload: &serde_json::Value,
     ) -> HookResult {
         let prompt = inject_arguments(prompt_text, payload);

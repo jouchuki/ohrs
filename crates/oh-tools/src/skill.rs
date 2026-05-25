@@ -17,6 +17,12 @@ pub struct SkillTool {
     entries: RwLock<Vec<SkillEntry>>,
 }
 
+impl Default for SkillTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SkillTool {
     pub fn new() -> Self {
         Self {

@@ -118,7 +118,7 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load settings
     let config_path = args.settings.as_deref().map(PathBuf::from);
-    let settings = load_settings(config_path.as_ref().map(|p| p.as_path()))?;
+    let settings = load_settings(config_path.as_deref())?;
 
     // Apply CLI overrides
     let settings = settings.merge_cli_overrides(CliOverrides {
@@ -407,7 +407,7 @@ fn save_trajectory(
     let mut writer = std::io::BufWriter::new(file);
     let start = std::time::Instant::now();
 
-    let mut writeln_json = |writer: &mut std::io::BufWriter<std::fs::File>,
+    let writeln_json = |writer: &mut std::io::BufWriter<std::fs::File>,
                             entry: serde_json::Value|
      -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_writer(&mut *writer, &entry)?;

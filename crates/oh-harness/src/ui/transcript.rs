@@ -8,6 +8,7 @@ pub struct TranscriptEntry {
     pub role: TranscriptRole,
     pub text: String,
     pub tool_name: Option<String>,
+    #[allow(dead_code)]
     pub tool_input: Option<HashMap<String, serde_json::Value>>,
     pub is_error: bool,
 }
@@ -19,6 +20,7 @@ pub enum TranscriptRole {
     Tool,
     ToolResult,
     System,
+    #[allow(dead_code)]
     Log,
 }
 
