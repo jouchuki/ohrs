@@ -31,6 +31,17 @@ impl ToolRegistry {
         self.tools.values().map(|t| t.as_ref()).collect()
     }
 
+    /// Drop every tool whose name does not satisfy `keep`.
+    ///
+    /// Used to scope a registry down to an agent definition's tool policy
+    /// (allow-list / deny-list) without rebuilding it tool-by-tool.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&str) -> bool,
+    {
+        self.tools.retain(|name, _| keep(name));
+    }
+
     /// Return all tool schemas in API format.
     pub fn to_api_schemas(&self) -> Vec<ToolSchema> {
         self.tools.values().map(|t| t.to_api_schema()).collect()
@@ -119,6 +130,16 @@ mod tests {
         let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         names.sort();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_retain_keeps_only_matching_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeTool { tool_name: "keep" }));
+        registry.register(Box::new(FakeTool { tool_name: "drop" }));
+        registry.retain(|name| name == "keep");
+        let names: Vec<&str> = registry.list_tools().iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["keep"]);
     }
 
     #[test]

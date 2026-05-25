@@ -1,6 +1,6 @@
 //! CLI argument definitions and main entry point.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use oh_api::{AnthropicApiClient, CodexApiClient, OpenAiApiClient, StreamingApiClient};
 use oh_config::{load_settings, CliOverrides};
 use oh_engine::QueryEngine;
@@ -95,10 +95,27 @@ pub struct Args {
     /// Mutually exclusive with --cwd.
     #[arg(long)]
     pub tempdir: bool,
+
+    /// One-shot / non-interactive subcommands.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Top-level subcommands. When absent, the binary runs in print/interactive mode.
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Run a single prompt to completion and print the result (used by the
+    /// subprocess subagent backend).
+    Run(crate::run_once::RunArgs),
 }
 
 /// Main CLI entry point.
 pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // One-shot subcommands short-circuit the interactive/print path.
+    if let Some(Command::Run(run_args)) = args.command {
+        return crate::run_once::run(run_args).await;
+    }
+
     // Load settings
     let config_path = args.settings.as_deref().map(PathBuf::from);
     let settings = load_settings(config_path.as_ref().map(|p| p.as_path()))?;

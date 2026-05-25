@@ -7,11 +7,13 @@
 /// * [`mailbox`] — file-based, atomic-write JSON mailbox
 /// * [`backend`] — `Backend` trait + `TeammateStatus`
 /// * [`in_process`] — `InProcessBackend` (tokio tasks + `CancellationToken`)
+/// * [`subprocess`] — `SubprocessBackend` (OS child processes via `oh run`)
 /// * [`team`] — `TeamManager` (file-backed team + member registry)
 pub mod backend;
 pub mod error;
 pub mod in_process;
 pub mod mailbox;
+pub mod subprocess;
 pub mod team;
 pub mod types;
 
@@ -19,6 +21,7 @@ pub mod types;
 pub use backend::{Backend, TeammateStatus};
 pub use error::SwarmError;
 pub use in_process::InProcessBackend;
+pub use subprocess::SubprocessBackend;
 pub use mailbox::Mailbox;
 pub use team::TeamManager;
 pub use types::{
