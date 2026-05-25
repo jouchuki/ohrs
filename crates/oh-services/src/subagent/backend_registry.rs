@@ -6,14 +6,17 @@
 //!    `OPENHARNESSRS_*` convention),
 //! 3. the default ([`SubagentIsolation::InProcess`]).
 //!
-//! Phase 0 only resolves `InProcess` to a real backend ([`InProcessBackend`]);
-//! `Subprocess` and `Worktree` return [`SubagentError::BackendUnimplemented`].
-//! The registry, selection logic, and env override exist now so Phases 2-3 can
-//! slot real backends in behind the same API.
+//! All three modes resolve to real backends: `InProcess` →
+//! [`InProcessBackend`], `Subprocess` → [`SubprocessBackend`] launching the
+//! current `oh` binary in `oh run` one-shot mode, and `Worktree` →
+//! [`WorktreeBackend`] (a subprocess rooted in a freshly-created git worktree).
+//! The env override (`OPENHARNESSRS_TEAMMATE_MODE`) and selection logic let the
+//! caller switch modes without changing call sites.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use oh_swarm::{Backend, InProcessBackend};
+use oh_swarm::{Backend, InProcessBackend, SubprocessBackend, WorktreeBackend};
 use oh_types::subagent::{SubagentError, SubagentIsolation};
 
 /// Name of the env var that overrides the default teammate/subagent backend.
@@ -45,20 +48,41 @@ impl BackendRegistry {
         }
     }
 
+    /// Path to the running `oh` binary — what the subprocess/worktree backends
+    /// re-exec in `oh run` one-shot mode.
+    fn oh_binary() -> Result<PathBuf, SubagentError> {
+        std::env::current_exe()
+            .map_err(|e| SubagentError::Spawn(format!("cannot resolve oh binary path: {e}")))
+    }
+
     /// Construct the backend for the given (already-resolved) mode.
     ///
-    /// Only `InProcess` is wired in Phase 0.
+    /// All three modes are wired:
+    /// * `InProcess` → [`InProcessBackend`] rooted at `<tasks>/teammates`.
+    /// * `Subprocess` → [`SubprocessBackend`] running `oh run`.
+    /// * `Worktree` → [`WorktreeBackend`] running `oh run` in a git worktree
+    ///   checked out of the current directory, under `<tasks>/worktrees`.
     pub fn backend_for(&self, mode: SubagentIsolation) -> Result<Arc<dyn Backend>, SubagentError> {
         match mode {
             SubagentIsolation::InProcess => {
                 let team_root = oh_config::get_tasks_dir().join("teammates");
                 Ok(Arc::new(InProcessBackend::new(team_root)))
             }
-            SubagentIsolation::Subprocess => Err(SubagentError::BackendUnimplemented(
-                "subprocess".to_string(),
-            )),
+            SubagentIsolation::Subprocess => {
+                let oh = Self::oh_binary()?;
+                Ok(Arc::new(SubprocessBackend::new(oh, ["run"])))
+            }
             SubagentIsolation::Worktree => {
-                Err(SubagentError::BackendUnimplemented("worktree".to_string()))
+                let oh = Self::oh_binary()?;
+                let repo = std::env::current_dir()
+                    .map_err(|e| SubagentError::Spawn(format!("cannot resolve cwd: {e}")))?;
+                let worktrees_root = oh_config::get_tasks_dir().join("worktrees");
+                Ok(Arc::new(WorktreeBackend::new(
+                    repo,
+                    worktrees_root,
+                    oh,
+                    ["run"],
+                )))
             }
         }
     }
@@ -125,15 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_for_subprocess_and_worktree_unimplemented() {
+    fn test_backend_for_subprocess_and_worktree_are_real() {
         let reg = BackendRegistry::new();
-        assert!(matches!(
-            reg.backend_for(SubagentIsolation::Subprocess),
-            Err(SubagentError::BackendUnimplemented(_))
-        ));
-        assert!(matches!(
-            reg.backend_for(SubagentIsolation::Worktree),
-            Err(SubagentError::BackendUnimplemented(_))
-        ));
+        // Both now construct real backends (no BackendUnimplemented).
+        assert!(reg.backend_for(SubagentIsolation::Subprocess).is_ok());
+        assert!(reg.backend_for(SubagentIsolation::Worktree).is_ok());
     }
 }

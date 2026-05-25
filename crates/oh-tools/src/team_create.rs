@@ -44,9 +44,10 @@ impl crate::traits::Tool for TeamCreateTool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let registry = oh_services::coordinator::get_team_registry();
-        let mut reg = registry.lock().unwrap();
-        match reg.create_team(name, description) {
+        // Drive the file-backed TeamManager (source of truth) and mirror into
+        // the in-memory registry via the bridge.
+        let bridge = oh_services::coordinator::TeamBridge::default_root();
+        match bridge.create_team(name, description).await {
             Ok(_) => ToolResult::success(format!("Created team: {name}")),
             Err(e) => ToolResult::error(e),
         }

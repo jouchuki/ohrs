@@ -106,6 +106,105 @@ impl SubagentManager {
                 .collect(),
         }
     }
+
+    /// Build the `oh run …` argument vector for a subprocess/worktree spawn.
+    ///
+    /// Mirrors the flags `oh-harness`'s `run_once` accepts: `--prompt` plus the
+    /// resolved agent-definition flags (`--agent-def`, `--system-prompt`,
+    /// `--model`) and `--json` so the parent can parse `{"result": …}`.
+    fn build_run_args(&self, req: &SpawnRequest, def: &AgentDefinition) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "--prompt".to_string(),
+            req.prompt.clone(),
+        ];
+        args.push("--agent-def".to_string());
+        args.push(def.name.clone());
+        if let Some(sp) = &def.system_prompt {
+            args.push("--system-prompt".to_string());
+            args.push(sp.clone());
+        }
+        // Model precedence: explicit request model > agent-def model.
+        if let Some(model) = req.model.clone().or_else(|| def.model.clone()) {
+            args.push("--model".to_string());
+            args.push(model);
+        }
+        args.push("--json".to_string());
+        args
+    }
+
+    /// Render the `oh run …` invocation as a shell command string for the
+    /// background task manager's `/bin/bash -lc` path. Each argument is
+    /// single-quote-escaped so prompts with spaces/quotes survive.
+    fn build_run_command(&self, req: &SpawnRequest, def: &AgentDefinition) -> String {
+        let oh = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "oh".to_string());
+        let mut parts = vec![shell_quote(&oh)];
+        for a in self.build_run_args(req, def) {
+            parts.push(shell_quote(&a));
+        }
+        parts.join(" ")
+    }
+
+    /// Spawn a subprocess (or worktree) subagent: build the `oh run` command,
+    /// record a `TaskType::RemoteAgent` task through `BackgroundTaskManager`
+    /// (reusing its child-spawn + log-tee path so `read_output` returns the
+    /// subagent's stdout), and — for worktree mode — create the worktree to use
+    /// as cwd and schedule its removal on completion.
+    async fn spawn_remote(
+        &self,
+        req: SpawnRequest,
+        def: &AgentDefinition,
+        worktree: bool,
+    ) -> Result<SpawnResult, SubagentError> {
+        let command = self.build_run_command(&req, def);
+        let description = format!("subagent {} ({})", req.agent_id, def.name);
+
+        let (cwd, worktree_dir) = if worktree {
+            let repo = std::path::PathBuf::from(&self.cwd);
+            let dir = oh_config::get_tasks_dir()
+                .join("worktrees")
+                .join(req.agent_id.as_str());
+            oh_swarm::add_worktree(&repo, &dir, None)
+                .await
+                .map_err(|e| SubagentError::Spawn(format!("git worktree add: {e}")))?;
+            (dir.to_string_lossy().into_owned(), Some((repo, dir)))
+        } else {
+            (self.cwd.clone(), None)
+        };
+
+        let record = self
+            .tasks
+            .create_remote_agent_task(&command, &description, &cwd)
+            .await;
+
+        // Clean up the worktree once the task reaches a terminal state.
+        if let Some((repo, dir)) = worktree_dir {
+            let target = record.id.clone();
+            let unregister = self
+                .tasks
+                .register_completion_listener(Box::new(move |rec| {
+                    if rec.id == target {
+                        let repo = repo.clone();
+                        let dir = dir.clone();
+                        tokio::spawn(async move {
+                            oh_swarm::remove_worktree(&repo, &dir).await;
+                        });
+                    }
+                }))
+                .await;
+            // The listener self-fires on completion; drop the unregister handle
+            // (it removes the closure on the next scheduler tick, which is fine
+            // because the task is one-shot).
+            drop(unregister);
+        }
+
+        Ok(SpawnResult {
+            agent_id: req.agent_id,
+            task_id: record.id,
+        })
+    }
 }
 
 #[async_trait]
@@ -114,16 +213,17 @@ impl SubagentSpawner for SubagentManager {
         // Resolve the agent definition (validates the type via fallback).
         let def = self.resolve_definition(&req.subagent_type);
 
-        // Select the backend. Phase 1: only InProcess resolves; Subprocess /
-        // Worktree surface BackendUnimplemented here.
-        let _backend = self.backends.select(req.isolation)?;
+        // Resolve the effective backend mode (explicit request → env → default)
+        // and ensure a backend can be constructed for it.
+        let mode = self.backends.resolve_mode(req.isolation);
+        let _backend = self.backends.backend_for(mode)?;
 
-        // Only the in-process backend is driven in Phase 1.
-        if self.backends.resolve_mode(req.isolation) != SubagentIsolation::InProcess {
-            return Err(SubagentError::BackendUnimplemented(format!(
-                "{:?}",
-                req.isolation
-            )));
+        // Subprocess / worktree spawns shell out to `oh run` and are tracked as
+        // `RemoteAgent` tasks; only InProcess uses the nested-runner path below.
+        match mode {
+            SubagentIsolation::Subprocess => return self.spawn_remote(req, &def, false).await,
+            SubagentIsolation::Worktree => return self.spawn_remote(req, &def, true).await,
+            SubagentIsolation::InProcess => {}
         }
 
         let allowed = self.allowed_tools(&def);
@@ -177,6 +277,15 @@ impl SubagentSpawner for SubagentManager {
     }
 }
 
+/// Single-quote-escape `s` for a POSIX `/bin/bash -lc` command line.
+///
+/// Wraps the value in single quotes and replaces embedded single quotes with
+/// the `'\''` idiom so prompts containing spaces, quotes, or shell
+/// metacharacters are passed through verbatim.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,12 +307,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spawn_subprocess_unimplemented() {
+    async fn test_spawn_subprocess_records_remote_agent_task() {
         let mgr = manager();
         let mut req = SpawnRequest::new(AgentId::new("sub-2"), "worker", "go");
         req.isolation = SubagentIsolation::Subprocess;
-        let err = mgr.spawn(req).await.unwrap_err();
-        assert!(matches!(err, SubagentError::BackendUnimplemented(_)));
+        let res = mgr.spawn(req).await.unwrap();
+        assert_eq!(res.agent_id, AgentId::new("sub-2"));
+
+        // A RemoteAgent task is recorded (the child shells out to `oh run`; we
+        // only assert the handle is uniform with in-process, not that the real
+        // `oh` binary ran).
+        let rec = mgr.tasks.get_task(&res.task_id).await.unwrap();
+        assert_eq!(rec.task_type, oh_types::tasks::TaskType::RemoteAgent);
+        assert!(rec.command.as_deref().unwrap().contains("--prompt"));
+        assert!(rec.command.as_deref().unwrap().contains("'go'"));
+        // Stop it so a slow/hanging child is reaped.
+        mgr.tasks.stop_task(&res.task_id).await;
+    }
+
+    #[test]
+    fn test_shell_quote_escapes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_build_run_args_includes_flags() {
+        let mgr = manager();
+        let def = mgr.resolve_definition("Explore");
+        let req = SpawnRequest::new(AgentId::new("r1"), "Explore", "find things");
+        let args = mgr.build_run_args(&req, &def);
+        assert_eq!(args[0], "run");
+        assert!(args.iter().any(|a| a == "--prompt"));
+        assert!(args.iter().any(|a| a == "find things"));
+        assert!(args.iter().any(|a| a == "--agent-def"));
+        assert!(args.iter().any(|a| a == "Explore"));
+        assert!(args.iter().any(|a| a == "--json"));
     }
 
     #[test]

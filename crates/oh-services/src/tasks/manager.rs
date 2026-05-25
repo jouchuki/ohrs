@@ -87,12 +87,45 @@ impl BackgroundTaskManager {
 
     // ── Task creation ─────────────────────────────────────────────────────
 
-    /// Create and immediately start a shell task.
+    /// Create and immediately start a shell task (`TaskType::LocalBash`).
     pub async fn create_shell_task(
         &self,
         command: &str,
         description: &str,
         cwd: &str,
+    ) -> TaskRecord {
+        self.create_command_task(command, description, cwd, TaskType::LocalBash)
+            .await
+    }
+
+    /// Create and immediately start a subprocess-agent task
+    /// (`TaskType::RemoteAgent`).
+    ///
+    /// Used by the subprocess / worktree subagent backends: `command` is the
+    /// `oh run …` invocation, `cwd` is the agent's working directory (a git
+    /// worktree for the worktree backend). The child's stdout/stderr are tee'd
+    /// to the task log so `read_output` returns the subagent's final text — the
+    /// same `spawn_and_watch` machinery shell tasks use, no separate process
+    /// management.
+    pub async fn create_remote_agent_task(
+        &self,
+        command: &str,
+        description: &str,
+        cwd: &str,
+    ) -> TaskRecord {
+        self.create_command_task(command, description, cwd, TaskType::RemoteAgent)
+            .await
+    }
+
+    /// Shared body for command-backed tasks: record a `TaskRecord` of
+    /// `task_type`, spawn `/bin/bash -lc <command>` in `cwd`, and tee its output
+    /// to the task log via [`spawn_and_watch`].
+    async fn create_command_task(
+        &self,
+        command: &str,
+        description: &str,
+        cwd: &str,
+        task_type: TaskType,
     ) -> TaskRecord {
         let id = Uuid::new_v4().to_string();
         let output_file = oh_config::get_tasks_dir().join(format!("{id}.log"));
@@ -105,7 +138,7 @@ impl BackgroundTaskManager {
 
         let record = TaskRecord {
             id: id.clone(),
-            task_type: TaskType::LocalBash,
+            task_type,
             status: TaskStatus::Running,
             description: description.to_string(),
             cwd: cwd.to_string(),

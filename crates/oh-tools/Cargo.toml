@@ -10,6 +10,7 @@ oh-types.workspace = true
 oh-telemetry.workspace = true
 oh-mcp.workspace = true
 oh-services.workspace = true
+oh-swarm.workspace = true
 oh-config.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

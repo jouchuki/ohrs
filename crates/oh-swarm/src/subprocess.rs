@@ -11,6 +11,7 @@
 //! vector and selects this backend via the `BackendRegistry`; this crate only
 //! provides a correct, lifecycle-managed [`Backend`] implementation.
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -56,6 +57,11 @@ pub struct SubprocessBackend {
     /// appends the per-teammate flags (`--prompt …`) when configuring the
     /// teammate's command via [`SubprocessBackend::spawn_command`].
     base_args: Vec<OsString>,
+    /// Optional working directory for spawned children. `None` inherits the
+    /// parent's cwd; [`WorktreeBackend`](crate::worktree::WorktreeBackend) sets
+    /// this to a freshly-created git worktree so it can reuse this backend's
+    /// child management unchanged.
+    cwd: Option<PathBuf>,
     tasks: Arc<DashMap<TeammateId, Entry>>,
 }
 
@@ -72,8 +78,19 @@ impl SubprocessBackend {
         SubprocessBackend {
             program: program.into(),
             base_args: base_args.into_iter().map(Into::into).collect(),
+            cwd: None,
             tasks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Return a copy of this backend that spawns children in `cwd`.
+    ///
+    /// Used by [`WorktreeBackend`](crate::worktree::WorktreeBackend) to reuse
+    /// this backend's child lifecycle management while running the teammate in a
+    /// git worktree, instead of duplicating the spawn/kill/status logic.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
     }
 
     /// Build the `Command` a spawn will run: `program <base_args...>`.
@@ -83,6 +100,9 @@ impl SubprocessBackend {
     fn spawn_command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.base_args);
+        if let Some(ref dir) = self.cwd {
+            cmd.current_dir(dir);
+        }
         // Don't leak the parent's stdin into the child; the design passes
         // everything via flags.
         cmd.stdin(std::process::Stdio::null());

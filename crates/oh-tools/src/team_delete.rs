@@ -39,9 +39,8 @@ impl crate::traits::Tool for TeamDeleteTool {
             None => return ToolResult::error("Missing required parameter: name"),
         };
 
-        let registry = oh_services::coordinator::get_team_registry();
-        let mut reg = registry.lock().unwrap();
-        match reg.delete_team(name) {
+        let bridge = oh_services::coordinator::TeamBridge::default_root();
+        match bridge.delete_team(name).await {
             Ok(()) => ToolResult::success(format!("Deleted team: {name}")),
             Err(e) => ToolResult::error(e),
         }

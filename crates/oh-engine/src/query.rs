@@ -488,6 +488,25 @@ async fn apply_hook_action(context: &QueryContext, action: &serde_json::Value) {
         "clear_all" => {
             tracing::info!("All hooks cleared via HookManage tool");
         }
+        "fire_event" => {
+            // A tool requests that a lifecycle hook be fired with a payload —
+            // used by the inter-agent messaging tool to raise
+            // `SubagentMessage` through the same hook executor everything else
+            // uses (the tool itself has no executor handle).
+            if let Some(event_str) = action.get("event").and_then(|v| v.as_str()) {
+                if let Ok(event) = serde_json::from_value::<HookEvent>(serde_json::Value::String(
+                    event_str.to_string(),
+                )) {
+                    let payload = action
+                        .get("payload")
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
+                    if let Some(ref executor) = context.hook_executor {
+                        executor.execute(event, payload).await;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }

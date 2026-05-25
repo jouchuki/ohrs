@@ -1635,6 +1635,7 @@ dependencies = [
  "oh-config",
  "oh-mcp",
  "oh-services",
+ "oh-swarm",
  "oh-telemetry",
  "oh-types",
  "regex",

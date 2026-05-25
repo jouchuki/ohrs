@@ -17,6 +17,7 @@ pub mod web_search;
 pub mod agent;
 pub mod ask_user_question;
 pub mod send_message;
+pub mod teammate_message;
 pub mod skill;
 pub mod tool_search;
 pub mod sleep;
@@ -65,6 +66,7 @@ pub fn create_default_tool_registry() -> ToolRegistry {
     registry.register(Box::new(agent::AgentTool));
     registry.register(Box::new(ask_user_question::AskUserQuestionTool));
     registry.register(Box::new(send_message::SendMessageTool));
+    registry.register(Box::new(teammate_message::TeammateMessageTool));
     registry.register(Box::new(skill::SkillTool::new()));
     registry.register(Box::new(tool_search::ToolSearchTool));
     registry.register(Box::new(sleep::SleepTool));
