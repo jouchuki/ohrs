@@ -51,6 +51,16 @@ pub mod hook_manage;
 pub use traits::Tool;
 pub use registry::ToolRegistry;
 
+/// Serializes tests that mutate process-global environment variables.
+///
+/// Unit tests across this crate compile into a single test binary and run in
+/// parallel by default. Several tests (cron create/list/delete, teammate
+/// messages, etc.) mutate the shared `OPENHARNESSRS_DATA_DIR` env var, so they
+/// must acquire this lock before touching the environment to avoid clobbering
+/// each other.
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Create the default tool registry with all built-in tools.
 pub fn create_default_tool_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();

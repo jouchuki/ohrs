@@ -109,6 +109,7 @@ mod tests {
 
     #[test]
     fn test_get_config_dir_env_override() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("custom_config");
         unsafe { std::env::set_var("OPENHARNESSRS_CONFIG_DIR", custom.to_str().unwrap()) };
@@ -120,6 +121,7 @@ mod tests {
 
     #[test]
     fn test_get_data_dir_env_override() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("custom_data");
         unsafe { std::env::set_var("OPENHARNESSRS_DATA_DIR", custom.to_str().unwrap()) };
@@ -131,6 +133,7 @@ mod tests {
 
     #[test]
     fn test_get_logs_dir_env_override() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("custom_logs");
         unsafe { std::env::set_var("OPENHARNESSRS_LOGS_DIR", custom.to_str().unwrap()) };
@@ -144,6 +147,7 @@ mod tests {
 
     #[test]
     fn test_get_config_dir_legacy_env_fallback() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("legacy_config");
         unsafe {
@@ -158,6 +162,7 @@ mod tests {
 
     #[test]
     fn test_get_config_dir_primary_takes_precedence_over_legacy() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let primary = dir.path().join("primary_config");
         let legacy = dir.path().join("legacy_config");
@@ -175,6 +180,7 @@ mod tests {
 
     #[test]
     fn test_get_data_dir_legacy_env_fallback() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("legacy_data");
         unsafe {
@@ -189,6 +195,7 @@ mod tests {
 
     #[test]
     fn test_get_logs_dir_legacy_env_fallback() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let custom = dir.path().join("legacy_logs");
         unsafe {
@@ -205,6 +212,7 @@ mod tests {
 
     #[test]
     fn test_get_config_dir_default_structure() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("oh_base");
         unsafe { std::env::set_var("OPENHARNESSRS_CONFIG_DIR", base.to_str().unwrap()) };
@@ -216,6 +224,7 @@ mod tests {
 
     #[test]
     fn test_get_config_file_path_ends_with_settings_json() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("oh_cfg");
         unsafe { std::env::set_var("OPENHARNESSRS_CONFIG_DIR", base.to_str().unwrap()) };
@@ -226,6 +235,7 @@ mod tests {
 
     #[test]
     fn test_get_data_dir_defaults_under_config_dir() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("oh_cfg2");
         unsafe {
@@ -240,6 +250,7 @@ mod tests {
 
     #[test]
     fn test_get_logs_dir_defaults_under_config_dir() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("oh_cfg3");
         unsafe {
@@ -254,6 +265,7 @@ mod tests {
 
     #[test]
     fn test_get_sessions_dir_under_data() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("oh_data");
         unsafe { std::env::set_var("OPENHARNESSRS_DATA_DIR", data.to_str().unwrap()) };
@@ -265,6 +277,7 @@ mod tests {
 
     #[test]
     fn test_get_tasks_dir_under_data() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("oh_data2");
         unsafe { std::env::set_var("OPENHARNESSRS_DATA_DIR", data.to_str().unwrap()) };
@@ -276,6 +289,7 @@ mod tests {
 
     #[test]
     fn test_get_feedback_dir_under_data() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("oh_data3");
         unsafe { std::env::set_var("OPENHARNESSRS_DATA_DIR", data.to_str().unwrap()) };
@@ -287,6 +301,7 @@ mod tests {
 
     #[test]
     fn test_get_feedback_log_path() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("oh_data4");
         unsafe { std::env::set_var("OPENHARNESSRS_DATA_DIR", data.to_str().unwrap()) };
@@ -297,6 +312,7 @@ mod tests {
 
     #[test]
     fn test_get_cron_registry_path() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("oh_data5");
         unsafe { std::env::set_var("OPENHARNESSRS_DATA_DIR", data.to_str().unwrap()) };

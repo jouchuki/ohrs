@@ -65,6 +65,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cron_delete_success() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cron_jobs.json");
         let jobs = vec![CronJob {
@@ -97,6 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cron_delete_not_found() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("OPENHARNESSRS_DATA_DIR", dir.path().to_str().unwrap());
