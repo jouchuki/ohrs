@@ -22,7 +22,7 @@ members = [
 version = "1.0.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/HKUDS/openharness-rs"
+repository = "https://github.com/jouchuki/ohrs"
 
 [workspace.dependencies]
 # Async runtime
