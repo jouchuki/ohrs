@@ -66,3 +66,37 @@ jobs:
             OHRS_VCS_REF=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  binaries:
+    name: build-and-upload linux binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin oh
+
+      - name: Package tarball + checksum
+        run: |
+          tar -C target/release -czf oh-x86_64-unknown-linux-gnu.tar.gz oh
+          sha256sum oh-x86_64-unknown-linux-gnu.tar.gz \
+            > oh-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Attach to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Create the release for this tag if it doesn't exist yet, then
+          # upload (clobbering any prior asset of the same name).
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" --generate-notes --verify-tag \
+            || true
+          gh release upload "${{ github.ref_name }}" \
+            oh-x86_64-unknown-linux-gnu.tar.gz \
+            oh-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            --clobber
