@@ -20,6 +20,13 @@ pub struct ToolExecutionContext {
     pub subagents: Option<Arc<dyn SubagentSpawner>>,
     /// Handle for the background-task control plane.
     pub tasks: Option<Arc<dyn BackgroundTasks>>,
+    /// Working-directory confinement roots (TOOL-4 / contract C4).
+    ///
+    /// When non-empty, file tools must canonicalize their target and reject any
+    /// path that resolves outside *every* root. Empty (the default) means
+    /// unconfined for backwards compatibility. The harness/engine populates this
+    /// (typically with `vec![cwd]`).
+    pub allowed_roots: Vec<PathBuf>,
 }
 
 impl ToolExecutionContext {
@@ -29,6 +36,7 @@ impl ToolExecutionContext {
             metadata: HashMap::new(),
             subagents: None,
             tasks: None,
+            allowed_roots: Vec::new(),
         }
     }
 }
@@ -43,6 +51,7 @@ impl std::fmt::Debug for ToolExecutionContext {
                 &self.subagents.as_ref().map(|_| "<SubagentSpawner>"),
             )
             .field("tasks", &self.tasks.as_ref().map(|_| "<BackgroundTasks>"))
+            .field("allowed_roots", &self.allowed_roots)
             .finish()
     }
 }
@@ -108,6 +117,7 @@ mod tests {
         assert!(ctx.metadata.is_empty());
         assert!(ctx.subagents.is_none());
         assert!(ctx.tasks.is_none());
+        assert!(ctx.allowed_roots.is_empty());
     }
 
     #[test]

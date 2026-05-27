@@ -107,6 +107,13 @@ pub enum ApiError {
 
     #[error("network error: {0}")]
     Network(String),
+
+    /// A non-success HTTP response carrying its numeric status and raw body.
+    ///
+    /// Retryability is decided on `status` (see [`RETRYABLE_STATUS_CODES`]),
+    /// never by substring-matching the human-readable `body`.
+    #[error("HTTP {status}: {body}")]
+    Http { status: u16, body: String },
 }
 
 /// Retry configuration constants.
@@ -114,6 +121,11 @@ pub const MAX_RETRIES: u32 = 3;
 pub const BASE_DELAY_SECS: f64 = 1.0;
 pub const MAX_DELAY_SECS: f64 = 30.0;
 pub const RETRYABLE_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 529];
+
+/// HTTP status codes the API clients special-case during error mapping.
+pub const HTTP_UNAUTHORIZED: u16 = 401;
+pub const HTTP_FORBIDDEN: u16 = 403;
+pub const HTTP_TOO_MANY_REQUESTS: u16 = 429;
 
 #[cfg(test)]
 mod tests {
@@ -178,6 +190,22 @@ mod tests {
     fn test_api_error_network_display() {
         let err = ApiError::Network("timeout".into());
         assert_eq!(format!("{}", err), "network error: timeout");
+    }
+
+    #[test]
+    fn test_api_error_http_display_carries_status() {
+        let err = ApiError::Http {
+            status: 503,
+            body: "overloaded".into(),
+        };
+        assert_eq!(format!("{}", err), "HTTP 503: overloaded");
+    }
+
+    #[test]
+    fn test_special_status_constants() {
+        assert_eq!(HTTP_UNAUTHORIZED, 401);
+        assert_eq!(HTTP_FORBIDDEN, 403);
+        assert_eq!(HTTP_TOO_MANY_REQUESTS, 429);
     }
 
     #[test]

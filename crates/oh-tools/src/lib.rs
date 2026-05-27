@@ -2,6 +2,7 @@
 //!
 //! Provides 43+ tools: bash, file I/O, search, web, MCP, tasks, etc.
 
+pub mod pathsafe;
 pub mod registry;
 pub mod traits;
 

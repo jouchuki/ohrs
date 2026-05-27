@@ -5,8 +5,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::backend::Backend;
@@ -72,15 +74,38 @@ impl MembersFile {
 pub struct TeamManager {
     root: PathBuf,
     backend: Arc<dyn Backend>,
+    /// Per-team mutex serializing the `members.json` load-modify-save cycle.
+    ///
+    /// Without it, concurrent `add_member`/`register_member`/`remove_member`
+    /// calls race on the read-modify-write and silently drop members
+    /// (last-writer-wins). See `SWARM-2`. The lock is created lazily and keyed
+    /// by [`TeamId`]; the `DashMap` itself only guards the per-team `Arc<Mutex>`
+    /// handles, so the critical section that touches the file is held by the
+    /// inner `Mutex`, not the map shard.
+    member_locks: Arc<DashMap<TeamId, Arc<Mutex<()>>>>,
 }
 
 impl TeamManager {
     pub fn new(root: PathBuf, backend: Arc<dyn Backend>) -> Self {
-        TeamManager { root, backend }
+        TeamManager {
+            root,
+            backend,
+            member_locks: Arc::new(DashMap::new()),
+        }
     }
 
     fn team_root(&self, team: &TeamId) -> PathBuf {
         self.root.join(&team.0)
+    }
+
+    /// Return the per-team mutex guarding `members.json` mutations, creating it
+    /// on first use. The `Arc` is cloned out so the `DashMap` shard guard is not
+    /// held across the (awaited) lock acquisition.
+    fn member_lock(&self, team: &TeamId) -> Arc<Mutex<()>> {
+        self.member_locks
+            .entry(team.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Create a new team directory and initialise an empty `members.json`.
@@ -111,7 +136,10 @@ impl TeamManager {
 
         let handle = self.backend.spawn(id.clone(), config).await?;
 
-        // Persist the member list.
+        // Persist the member list under the per-team lock so concurrent
+        // add/register/remove calls don't lose members (SWARM-2).
+        let lock = self.member_lock(team);
+        let _guard = lock.lock().await;
         let mut mf = MembersFile::load(&team_root).await?;
         if !mf.members.contains(&id.0) {
             mf.members.push(id.0.clone());
@@ -134,6 +162,8 @@ impl TeamManager {
         if !team_root.exists() {
             return Err(SwarmError::TeamNotFound(team.0.clone()));
         }
+        let lock = self.member_lock(team);
+        let _guard = lock.lock().await;
         let mut mf = MembersFile::load(&team_root).await?;
         if !mf.members.contains(&id.0) {
             mf.members.push(id.0.clone());
@@ -178,6 +208,8 @@ impl TeamManager {
             Err(e) => return Err(e),
         }
 
+        let lock = self.member_lock(team);
+        let _guard = lock.lock().await;
         let mut mf = MembersFile::load(&team_root).await?;
         mf.members.retain(|m| m != &id.0);
         mf.save(&team_root).await?;
@@ -257,6 +289,46 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert!(members.contains(&TeammateId::new("a1")));
         assert!(members.contains(&TeammateId::new("a2")));
+    }
+
+    /// SWARM-2 regression: many concurrent `register_member` calls must all be
+    /// persisted. Without the per-team lock the load-modify-save races and the
+    /// final `members.json` drops members (last-writer-wins).
+    #[tokio::test]
+    async fn concurrent_register_member_persists_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(TeamManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(NullBackend),
+        ));
+        let team = TeamId::new("swarm2");
+        mgr.create_team(team.clone()).await.unwrap();
+
+        const N: usize = 32;
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let mgr = mgr.clone();
+            let team = team.clone();
+            handles.push(tokio::spawn(async move {
+                mgr.register_member(&team, &TeammateId::new(format!("a{i}")))
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let members = mgr.list_members(&team).await.unwrap();
+        assert_eq!(
+            members.len(),
+            N,
+            "lost members under concurrency: got {} of {N}",
+            members.len()
+        );
+        for i in 0..N {
+            assert!(members.contains(&TeammateId::new(format!("a{i}"))));
+        }
     }
 
     #[tokio::test]

@@ -30,15 +30,19 @@ use crate::types::{TeammateConfig, TeammateHandle, TeammateId};
 // ---------------------------------------------------------------------------
 
 struct Entry {
-    /// The spawned child. Wrapped in a `Mutex` because `kill`/`status` need
-    /// `&mut Child` (to signal and to poll `try_wait`) while the backend is
-    /// shared behind an `Arc`.
-    child: Mutex<Child>,
+    /// The spawned child. Wrapped in `Arc<Mutex<…>>` because `kill`/`status`
+    /// need `&mut Child` (to signal and to poll `try_wait`) while the backend is
+    /// shared behind an `Arc`. The `Arc` lets callers cheaply clone the handle
+    /// out of the `DashMap` and DROP the shard guard *before* awaiting on the
+    /// child (see `SWARM-1`); holding a `dashmap::Ref` across `.await` would
+    /// stall every teammate hashing to the same shard.
+    child: Arc<Mutex<Child>>,
     #[allow(dead_code)]
     started_at: Instant,
     /// Set once the child has been observed exited, so `status` is stable even
-    /// after the OS has reaped the process.
-    finished: std::sync::atomic::AtomicBool,
+    /// after the OS has reaped the process. Shared (`Arc`) so the flag survives
+    /// being cloned out of the map alongside `child`.
+    finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,13 +131,20 @@ impl Backend for SubprocessBackend {
         id: TeammateId,
         config: TeammateConfig,
     ) -> Result<TeammateHandle, SwarmError> {
-        if let Some(entry) = self.tasks.get(&id) {
-            if !entry.finished.load(std::sync::atomic::Ordering::SeqCst) {
-                // Still tracked and not observed-finished → treat as running.
-                let mut child = entry.child.lock().await;
-                if matches!(child.try_wait(), Ok(None)) {
-                    return Err(SwarmError::AlreadyRunning(id.0.clone()));
-                }
+        // Clone the existing child handle out and DROP the DashMap ref before
+        // awaiting the lock (SWARM-1): holding the shard guard across `.await`
+        // would block concurrent ops on teammates in the same shard.
+        let existing = self.tasks.get(&id).and_then(|entry| {
+            if entry.finished.load(std::sync::atomic::Ordering::SeqCst) {
+                None
+            } else {
+                Some(entry.child.clone())
+            }
+        });
+        if let Some(child) = existing {
+            let mut child = child.lock().await;
+            if matches!(child.try_wait(), Ok(None)) {
+                return Err(SwarmError::AlreadyRunning(id.0.clone()));
             }
         }
 
@@ -144,9 +155,9 @@ impl Backend for SubprocessBackend {
         let child = cmd.spawn().map_err(SwarmError::Io)?;
 
         let entry = Entry {
-            child: Mutex::new(child),
+            child: Arc::new(Mutex::new(child)),
             started_at: Instant::now(),
-            finished: std::sync::atomic::AtomicBool::new(false),
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         self.tasks.insert(id.clone(), entry);
 
@@ -159,12 +170,18 @@ impl Backend for SubprocessBackend {
     }
 
     async fn kill(&self, id: &TeammateId, graceful: bool) -> Result<(), SwarmError> {
-        let entry = self
-            .tasks
-            .get(id)
-            .ok_or_else(|| SwarmError::TeammateNotFound(id.0.clone()))?;
+        // Clone the child + finished handles out, then DROP the DashMap ref
+        // before awaiting the kill/wait (SWARM-1) — never hold a shard guard
+        // across `.await`.
+        let (child, finished) = {
+            let entry = self
+                .tasks
+                .get(id)
+                .ok_or_else(|| SwarmError::TeammateNotFound(id.0.clone()))?;
+            (entry.child.clone(), entry.finished.clone())
+        };
 
-        let mut child = entry.child.lock().await;
+        let mut child = child.lock().await;
         if graceful {
             // Best-effort graceful stop: ask the kernel to terminate, then wait
             // for the child to be reaped. `Child::kill` sends SIGKILL on Unix;
@@ -176,28 +193,28 @@ impl Backend for SubprocessBackend {
             // Forceful: kill and reap immediately.
             let _ = child.kill().await;
         }
-        entry
-            .finished
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
     async fn status(&self, id: &TeammateId) -> Result<TeammateStatus, SwarmError> {
-        let entry = self
-            .tasks
-            .get(id)
-            .ok_or_else(|| SwarmError::TeammateNotFound(id.0.clone()))?;
+        // Clone handles out and drop the DashMap ref before awaiting (SWARM-1).
+        let (child, finished) = {
+            let entry = self
+                .tasks
+                .get(id)
+                .ok_or_else(|| SwarmError::TeammateNotFound(id.0.clone()))?;
+            (entry.child.clone(), entry.finished.clone())
+        };
 
-        if entry.finished.load(std::sync::atomic::Ordering::SeqCst) {
+        if finished.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TeammateStatus::Stopped);
         }
 
-        let mut child = entry.child.lock().await;
+        let mut child = child.lock().await;
         match child.try_wait() {
             Ok(Some(exit)) => {
-                entry
-                    .finished
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
                 if exit.success() {
                     Ok(TeammateStatus::Stopped)
                 } else {

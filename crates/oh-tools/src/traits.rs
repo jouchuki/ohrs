@@ -20,6 +20,20 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Filesystem paths this tool would touch given these arguments.
+    ///
+    /// The permission gate canonicalizes each returned path and checks it
+    /// against the sensitive-path blocklist and `allowed_roots` BEFORE
+    /// execution (TOOL-1 / contract C3). The default reads the conventional
+    /// `file_path` key; tools whose path argument differs override this.
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     /// Execute the tool.
     async fn execute(
         &self,
@@ -97,5 +111,18 @@ mod tests {
     fn test_is_read_only_default_false() {
         let tool = DummyTool;
         assert!(!tool.is_read_only(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn test_path_args_default_reads_file_path() {
+        let tool = DummyTool;
+        let args = serde_json::json!({ "file_path": "/etc/hosts" });
+        assert_eq!(tool.path_args(&args), vec!["/etc/hosts".to_string()]);
+    }
+
+    #[test]
+    fn test_path_args_default_empty_when_absent() {
+        let tool = DummyTool;
+        assert!(tool.path_args(&serde_json::json!({})).is_empty());
     }
 }

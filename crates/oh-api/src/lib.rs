@@ -4,6 +4,7 @@ pub mod client;
 pub mod codex;
 pub mod openai;
 pub mod provider;
+pub mod sse;
 pub mod streaming;
 
 pub use client::*;

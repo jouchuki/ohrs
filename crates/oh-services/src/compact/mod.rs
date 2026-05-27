@@ -139,6 +139,11 @@ impl Compactor {
                     ContentBlock::ToolResult(r) => {
                         total_chars += r.content.len();
                     }
+                    ContentBlock::Other(v) => {
+                        // Unknown block: approximate its size by its serialized
+                        // JSON length so the token estimate stays conservative.
+                        total_chars += v.to_string().len();
+                    }
                 }
             }
         }
@@ -363,8 +368,14 @@ impl Compactor {
                         ));
                     }
                     ContentBlock::ToolResult(r) => {
+                        // Snap the 200-byte preview to a char boundary so a
+                        // multi-byte tool result doesn't panic the summarizer.
                         let preview = if r.content.len() > 200 {
-                            format!("{}…[truncated]", &r.content[..200])
+                            let mut end = 200;
+                            while end > 0 && !r.content.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("{}…[truncated]", &r.content[..end])
                         } else {
                             r.content.clone()
                         };
@@ -372,6 +383,9 @@ impl Compactor {
                             "<tool_result id=\"{}\" error={}>{}</tool_result>\n",
                             r.tool_use_id, r.is_error, preview
                         ));
+                    }
+                    ContentBlock::Other(v) => {
+                        out.push_str(&format!("<unknown_block>{v}</unknown_block>\n"));
                     }
                 }
             }

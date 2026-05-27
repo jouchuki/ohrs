@@ -23,6 +23,15 @@ thiserror.workspace = true
 reqwest.workspace = true
 glob = "0.3"
 regex.workspace = true
+# TOOL-8: stream HTTP bodies with a hard byte cap instead of buffering text().
+futures-util = "0.3"
+url = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# TOOL-2: confine the bash child's filesystem access via the Landlock LSM.
+landlock = "0.4"
+# TOOL-10: kill the bash child's whole process GROUP on timeout (killpg).
+nix = { version = "0.29", features = ["signal", "process"] }
 
 [dev-dependencies]
 tempfile = "3"

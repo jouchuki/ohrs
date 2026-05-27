@@ -10,7 +10,37 @@ use oh_hooks::{HookEvent, HookExecutorTrait};
 use oh_permissions::PermissionChecker;
 use oh_tools::create_default_tool_registry;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::trajectory::{finalize, RunStatus, SharedTrajectory, TrajectoryWriter};
+
+/// Value emitted to stdout in print mode when `--output-format json` (contract C2).
+const OUTPUT_FORMAT_JSON: &str = "json";
+
+/// Process-wide handle to the active trajectory writer, so the SIGTERM/SIGINT
+/// handler installed in `main` can write the terminal `end` line (contract C1).
+static ACTIVE_TRAJECTORY: OnceLock<Mutex<Option<SharedTrajectory>>> = OnceLock::new();
+
+fn active_trajectory_slot() -> &'static Mutex<Option<SharedTrajectory>> {
+    ACTIVE_TRAJECTORY.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the active trajectory so signal handlers can finalize it.
+fn register_active_trajectory(shared: SharedTrajectory) {
+    if let Ok(mut slot) = active_trajectory_slot().lock() {
+        *slot = Some(shared);
+    }
+}
+
+/// Finalize the active trajectory (if any) with an `error` status. Called from
+/// the signal handler in `main` on SIGTERM/SIGINT.
+pub fn finalize_active_trajectory(reason: &str) {
+    if let Ok(slot) = active_trajectory_slot().lock() {
+        if let Some(shared) = slot.as_ref() {
+            finalize(shared, RunStatus::Error, Some(reason));
+        }
+    }
+}
 
 /// Fans a lifecycle event out to two [`HookExecutorTrait`]s: the real hook
 /// executor (blocks/webhooks) and the main agent's trajectory recorder.
@@ -232,6 +262,8 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             default_model: settings.model.clone(),
         },
     ));
+    // HOOK-1 / C7: live registry handle so HookManage mutations take effect.
+    let hook_registry_handle = hook_executor.registry_handle();
 
     // ── Trajectory recording for the MAIN agent ────────────────────────────
     // Open the session store, create a MAIN session row, and fan a
@@ -337,7 +369,6 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let runner_cwd = cwd.clone();
     let runner_system_prompt = system_prompt.clone();
 
-    let system_prompt_copy = system_prompt.clone();
     let mut engine = QueryEngine::new(
         api_client,
         tool_registry,
@@ -349,6 +380,15 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     engine.set_hook_executor(engine_hook_executor.clone());
     engine.set_session_id(main_session_id.clone());
+    // HOOK-1 / C7: thread the live registry so HookManage mutations apply.
+    engine.set_hook_registry(hook_registry_handle);
+    // ENG-1: enable proactive compaction when a threshold is configured.
+    if let Some(threshold) = settings.auto_compact_threshold_tokens {
+        engine.set_compactor(Arc::new(oh_services::compact::Compactor::new(
+            threshold,
+            threshold / 8,
+        )));
+    }
 
     // Store skill content in engine metadata for execute() lookup
     if !skill_registry_map.is_empty() {
@@ -406,45 +446,82 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Print mode: submit prompt and exit
     if let Some(prompt) = args.prompt {
-        let events = engine.submit_message(&prompt).await?;
-        let mut printed_text = false;
-        for (event, _) in &events {
-            match event {
-                oh_types::stream_events::StreamEvent::AssistantTextDelta(delta) => {
-                    print!("{}", delta.text);
-                    printed_text = true;
+        let json_mode = args.output_format == OUTPUT_FORMAT_JSON;
+
+        // Open the incremental trajectory writer (contract C1) BEFORE the run so
+        // crash/SIGTERM during the run still produces a durable file, and
+        // register it with the process-wide slot for the signal handler.
+        let trajectory: Option<SharedTrajectory> = match args.trajectory.as_deref() {
+            Some(traj_path) => match TrajectoryWriter::create(
+                traj_path,
+                &settings.model,
+                &main_session_id,
+            ) {
+                Ok(w) => {
+                    let shared: SharedTrajectory = Arc::new(Mutex::new(Some(w)));
+                    register_active_trajectory(shared.clone());
+                    Some(shared)
                 }
-                oh_types::stream_events::StreamEvent::AssistantTurnComplete(turn) => {
-                    if !printed_text {
-                        // API client returned complete message without streaming deltas
-                        print!("{}", turn.message.text());
-                    }
-                    println!();
+                Err(e) => {
+                    tracing::error!(path = %traj_path, error = %e, "failed to open trajectory file");
+                    None
                 }
-                _ => {}
+            },
+            None => None,
+        };
+
+        // Run the query. `submit_message` returns the full event vector (or an
+        // error); we then stream each event to the trajectory incrementally.
+        let run_result = engine.submit_message(&prompt).await;
+
+        match &run_result {
+            Ok(events) => {
+                if let Some(ref shared) = trajectory {
+                    write_events_to_trajectory(shared, events);
+                }
+                emit_print_output(events, json_mode, &settings.model);
+                if let Some(ref shared) = trajectory {
+                    finalize(shared, RunStatus::Ok, None);
+                }
+            }
+            Err(e) => {
+                let (status, error_msg) = classify_engine_error(e);
+                if let Some(ref shared) = trajectory {
+                    finalize(shared, status, Some(&error_msg));
+                }
+                if json_mode {
+                    // Contract C2: still emit exactly one JSON object on stdout.
+                    emit_error_json(status, &error_msg, &settings.model);
+                }
             }
         }
-        // Save trajectory if requested
-        if let Some(ref traj_path) = args.trajectory {
-            let tool_schemas = engine.tool_schemas();
-            save_trajectory(
-                traj_path,
-                &system_prompt_copy,
-                &prompt,
-                &settings.model,
-                &tool_schemas,
-                &events,
-            )?;
-            eprintln!("[trajectory saved to {traj_path}]");
+
+        // Drop/close the trajectory file (flushes; the `end` line is already
+        // written via finalize above) and clear the signal-handler slot.
+        if let Some(shared) = trajectory {
+            if let Ok(mut slot) = active_trajectory_slot().lock() {
+                *slot = None;
+            }
+            if let Ok(mut guard) = shared.lock() {
+                guard.take();
+            }
+            if !json_mode {
+                if let Some(ref traj_path) = args.trajectory {
+                    eprintln!("[trajectory saved to {traj_path}]");
+                }
+            }
         }
-        // Fire SessionEnd hook before exiting print mode
+
+        // Fire SessionEnd hook before exiting print mode.
         hook_executor
             .execute(
                 HookEvent::SessionEnd,
                 serde_json::json!({"reason": "print_mode_complete"}),
             )
             .await;
-        return Ok(());
+
+        // Propagate a non-zero exit on engine failure.
+        return run_result.map(|_| ()).map_err(|e| e.into());
     }
 
     // Interactive TUI mode
@@ -460,186 +537,289 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Serialize a training-ready trajectory to JSONL.
+/// Engine event tuple yielded by `submit_message`.
+type EngineEvent = (
+    oh_types::stream_events::StreamEvent,
+    Option<oh_types::api::UsageSnapshot>,
+);
+
+/// Map the engine's terminal error to a [`RunStatus`] + message (contracts C1/C2).
+fn classify_engine_error(err: &oh_engine::query::EngineError) -> (RunStatus, String) {
+    match err {
+        oh_engine::query::EngineError::MaxTurnsExceeded(_) => {
+            (RunStatus::MaxTurns, err.to_string())
+        }
+        _ => (RunStatus::Error, err.to_string()),
+    }
+}
+
+/// Sum per-turn usage snapshots into one aggregate (contract C2 `usage` object).
+fn aggregate_usage(events: &[EngineEvent]) -> oh_types::api::UsageSnapshot {
+    let mut agg = oh_types::api::UsageSnapshot::default();
+    for (_, usage) in events {
+        if let Some(u) = usage {
+            agg.input_tokens += u.input_tokens;
+            agg.output_tokens += u.output_tokens;
+            agg.cache_read_input_tokens += u.cache_read_input_tokens;
+            agg.cache_creation_input_tokens += u.cache_creation_input_tokens;
+        }
+    }
+    agg
+}
+
+/// Final assistant text = the text of the last completed assistant turn.
+fn final_result_text(events: &[EngineEvent]) -> String {
+    use oh_types::stream_events::StreamEvent;
+    events
+        .iter()
+        .rev()
+        .find_map(|(event, _)| match event {
+            StreamEvent::AssistantTurnComplete(tc) => Some(tc.message.text()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Stream completed engine events into the trajectory writer (contract C1).
 ///
-/// Output format follows the chat completions message schema so it can
-/// be fed directly into fine-tuning pipelines:
-///
-/// ```jsonl
-/// {"role":"system","content":"..."}
-/// {"role":"user","content":"..."}
-/// {"role":"assistant","content":"reasoning...","tool_calls":[{"id":"...","type":"function","function":{"name":"bash","arguments":"{...}"}}]}
-/// {"role":"tool","tool_call_id":"...","name":"bash","content":"output..."}
-/// {"role":"assistant","content":"more reasoning..."}
-/// ```
-///
-/// Metadata (model, timing, token usage) is attached as `_meta` on
-/// assistant messages so it can be stripped for training but kept for
-/// analysis.
-fn save_trajectory(
-    path: &str,
-    system_prompt: &str,
-    user_message: &str,
-    model: &str,
-    tool_schemas: &[serde_json::Value],
-    events: &[(
-        oh_types::stream_events::StreamEvent,
-        Option<oh_types::api::UsageSnapshot>,
-    )],
-) -> Result<(), Box<dyn std::error::Error>> {
+/// One `assistant` line per completed turn (with its tool calls + a per-turn
+/// `usage` line), and one `tool_result` line per executed tool, paired to the
+/// originating turn. Best-effort: IO errors are logged, not propagated, so a
+/// failed trajectory write never aborts the run.
+fn write_events_to_trajectory(shared: &SharedTrajectory, events: &[EngineEvent]) {
     use oh_types::messages::ContentBlock;
     use oh_types::stream_events::StreamEvent;
-    use std::io::Write;
 
-    let file = std::fs::File::create(path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    let start = std::time::Instant::now();
-
-    let writeln_json = |writer: &mut std::io::BufWriter<std::fs::File>,
-                        entry: serde_json::Value|
-     -> Result<(), Box<dyn std::error::Error>> {
-        serde_json::to_writer(&mut *writer, &entry)?;
-        writeln!(writer)?;
-        Ok(())
+    let mut guard = match shared.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let writer: &mut TrajectoryWriter = match guard.as_mut() {
+        Some(w) => w,
+        None => return,
     };
 
-    // ── System prompt ──
-    writeln_json(
-        &mut writer,
-        serde_json::json!({
-            "role": "system",
-            "content": system_prompt,
-            "_meta": {
-                "model": model,
-                "timestamp": chrono_now(),
-                "tools": tool_schemas,
-            }
-        }),
-    )?;
-
-    // ── User message ──
-    writeln_json(
-        &mut writer,
-        serde_json::json!({
-            "role": "user",
-            "content": user_message,
-        }),
-    )?;
-
-    // ── Agent turns ──
-    // Track pending tool_call_ids so we can pair ToolExecutionCompleted
-    // with the correct call (supports parallel tool calls).
-    let mut pending_tool_ids: std::collections::VecDeque<(String, String)> =
+    // Pending (tool_name, tool_use_id) queue so tool results pair with the
+    // correct call (supports parallel tool calls within a turn).
+    let mut pending: std::collections::VecDeque<(String, String)> =
         std::collections::VecDeque::new();
+    // The turn index of the assistant message currently awaiting tool results.
+    let mut current_turn: u64 = 0;
+
+    let log_err = |r: Result<(), std::io::Error>| {
+        if let Err(e) = r {
+            tracing::warn!(error = %e, "trajectory write failed");
+        }
+    };
 
     for (event, usage) in events {
         match event {
             StreamEvent::AssistantTurnComplete(tc) => {
-                // Build content string from text blocks
-                let content: String = tc
+                let text = tc.message.text();
+                let tool_calls: Vec<serde_json::Value> = tc
                     .message
                     .content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-
-                // Build tool_calls array in OpenAI fine-tuning format
-                let tool_calls: Vec<serde_json::Value> = tc.message.content.iter().filter_map(|b| {
-                    match b {
                         ContentBlock::ToolUse(tu) => {
-                            // Queue the id so we can match it to ToolExecutionCompleted
-                            pending_tool_ids.push_back((tu.name.clone(), tu.id.clone()));
+                            pending.push_back((tu.name.clone(), tu.id.clone()));
                             Some(serde_json::json!({
                                 "id": tu.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tu.name,
-                                    "arguments": serde_json::to_string(&tu.input).unwrap_or_default(),
-                                }
+                                "name": tu.name,
+                                "arguments": tu.input,
                             }))
                         }
                         _ => None,
+                    })
+                    .collect();
+
+                match writer.write_assistant(&text, &tool_calls) {
+                    Ok(turn) => {
+                        current_turn = turn;
+                        log_err(writer.write_usage(turn, &tc.usage));
                     }
-                }).collect();
-
-                let mut msg = serde_json::json!({
-                    "role": "assistant",
-                });
-
-                // content is null when there's only tool calls (per OpenAI spec)
-                if content.is_empty() {
-                    msg["content"] = serde_json::Value::Null;
-                } else {
-                    msg["content"] = serde_json::json!(content);
+                    Err(e) => tracing::warn!(error = %e, "trajectory assistant write failed"),
                 }
-
-                if !tool_calls.is_empty() {
-                    msg["tool_calls"] = serde_json::json!(tool_calls);
-                }
-
-                // Attach metadata for analysis (strip for training)
-                msg["_meta"] = serde_json::json!({
-                    "usage": usage,
-                    "_t_ms": start.elapsed().as_millis() as u64,
-                });
-
-                writeln_json(&mut writer, msg)?;
+                // `usage` arg is redundant here (the turn carries its own); keep
+                // the binding referenced to avoid a warning if it ever diverges.
+                let _ = usage;
             }
-
             StreamEvent::ToolExecutionCompleted(tc) => {
-                // Pop the matching tool_call_id from the queue
-                let tool_call_id = pending_tool_ids
+                let tool_use_id = pending
                     .iter()
                     .position(|(name, _)| name == &tc.tool_name)
-                    .and_then(|i| pending_tool_ids.remove(i))
+                    .and_then(|i| pending.remove(i))
                     .map(|(_, id)| id)
                     .unwrap_or_default();
-
-                writeln_json(
-                    &mut writer,
-                    serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "name": tc.tool_name,
-                        "content": tc.output,
-                        "_meta": {
-                            "is_error": tc.is_error,
-                            "_t_ms": start.elapsed().as_millis() as u64,
-                        }
-                    }),
-                )?;
+                log_err(writer.write_tool_result(
+                    current_turn,
+                    &tool_use_id,
+                    &tc.tool_name,
+                    &tc.output,
+                    tc.is_error,
+                ));
             }
-
-            // Text deltas and tool starts are intermediate signals —
-            // the complete data is in AssistantTurnComplete and
-            // ToolExecutionCompleted above. Skip to keep the training
-            // format clean.
+            // Deltas / starts are intermediate; the durable data lives in the
+            // completed events above.
             StreamEvent::AssistantTextDelta(_) => {}
             StreamEvent::ToolExecutionStarted(_) => {}
         }
     }
-
-    Ok(())
 }
 
-fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    // ISO-8601 approximation without pulling in chrono
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let rem_days = days % 365;
-    let months = rem_days / 30 + 1;
-    let day = rem_days % 30 + 1;
-    let hour = (secs % 86400) / 3600;
-    let min = (secs % 3600) / 60;
-    let sec = secs % 60;
-    format!("{years:04}-{months:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+/// Emit print-mode output. In `json` mode (contract C2) print EXACTLY one JSON
+/// object and suppress the raw prose stream. In text mode, behaviour is the
+/// original: stream deltas (or the buffered final message) as prose.
+fn emit_print_output(events: &[EngineEvent], json_mode: bool, model: &str) {
+    use oh_types::stream_events::StreamEvent;
+
+    if json_mode {
+        let usage = aggregate_usage(events);
+        let payload = serde_json::json!({
+            "v": crate::trajectory::SCHEMA_VERSION,
+            "result": final_result_text(events),
+            "model": model,
+            "status": RunStatus::Ok.as_str(),
+            "error": serde_json::Value::Null,
+            "usage": {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_input_tokens": usage.cache_read_input_tokens,
+                "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            },
+        });
+        // The single JSON object is the intended stdout payload in json mode.
+        println!(
+            "{}",
+            serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
+        );
+        return;
+    }
+
+    // ── text mode (unchanged behaviour) ──
+    let mut printed_text = false;
+    for (event, _) in events {
+        match event {
+            StreamEvent::AssistantTextDelta(delta) => {
+                print!("{}", delta.text);
+                printed_text = true;
+            }
+            StreamEvent::AssistantTurnComplete(turn) => {
+                if !printed_text {
+                    // API client returned a complete message without deltas.
+                    print!("{}", turn.message.text());
+                }
+                println!();
+            }
+            _ => {}
+        }
+    }
 }
+
+/// Emit the single JSON error object in json print-mode (contract C2) when the
+/// engine returned an error before any events were produced.
+fn emit_error_json(status: RunStatus, error: &str, model: &str) {
+    let payload = serde_json::json!({
+        "v": crate::trajectory::SCHEMA_VERSION,
+        "result": "",
+        "model": model,
+        "status": status.as_str(),
+        "error": error,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oh_types::api::UsageSnapshot;
+    use oh_types::messages::{ContentBlock, ConversationMessage, Role, TextBlock};
+    use oh_types::stream_events::{AssistantTurnComplete, StreamEvent};
+
+    fn turn_event(text: &str, usage: UsageSnapshot) -> EngineEvent {
+        (
+            StreamEvent::AssistantTurnComplete(AssistantTurnComplete {
+                message: ConversationMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text(TextBlock::new(text))],
+                },
+                usage: usage.clone(),
+            }),
+            Some(usage),
+        )
+    }
+
+    #[test]
+    fn test_aggregate_usage_sums_all_fields() {
+        let events = vec![
+            turn_event(
+                "a",
+                UsageSnapshot {
+                    input_tokens: 10,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 1,
+                    cache_creation_input_tokens: 2,
+                },
+            ),
+            turn_event(
+                "b",
+                UsageSnapshot {
+                    input_tokens: 20,
+                    output_tokens: 4,
+                    cache_read_input_tokens: 5,
+                    cache_creation_input_tokens: 6,
+                },
+            ),
+        ];
+        let agg = aggregate_usage(&events);
+        assert_eq!(agg.input_tokens, 30);
+        assert_eq!(agg.output_tokens, 7);
+        assert_eq!(agg.cache_read_input_tokens, 6);
+        assert_eq!(agg.cache_creation_input_tokens, 8);
+    }
+
+    #[test]
+    fn test_final_result_text_takes_last_turn() {
+        let events = vec![
+            turn_event("first", UsageSnapshot::default()),
+            turn_event("final answer", UsageSnapshot::default()),
+        ];
+        assert_eq!(final_result_text(&events), "final answer");
+    }
+
+    #[test]
+    fn test_final_result_text_empty_when_no_turns() {
+        assert_eq!(final_result_text(&[]), "");
+    }
+
+    #[test]
+    fn test_classify_engine_error_max_turns() {
+        let (status, _) =
+            classify_engine_error(&oh_engine::query::EngineError::MaxTurnsExceeded(30));
+        assert_eq!(status, RunStatus::MaxTurns);
+    }
+
+    #[test]
+    fn test_classify_engine_error_other_is_error() {
+        let (status, msg) =
+            classify_engine_error(&oh_engine::query::EngineError::ApiError("boom".into()));
+        assert_eq!(status, RunStatus::Error);
+        assert!(msg.contains("boom"));
+    }
+
+    #[test]
+    fn test_output_format_json_const() {
+        // Guards the C2 contract token capelle keys off of.
+        assert_eq!(OUTPUT_FORMAT_JSON, "json");
+    }
+}
+

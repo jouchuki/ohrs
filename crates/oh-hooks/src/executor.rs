@@ -18,6 +18,15 @@ use crate::matching::{inject_arguments, matches_hook};
 use crate::HookExecutorTrait;
 use oh_api::StreamingApiClient;
 
+/// Environment variable carrying the lifecycle event name to command hooks.
+const HOOK_EVENT_ENV: &str = "OPENHARNESS_HOOK_EVENT";
+/// Environment variable carrying the full JSON payload to command hooks.
+///
+/// Command hooks receive the (potentially model-influenced) payload here and on
+/// stdin only — it is **never** interpolated into the command string, so a
+/// hostile payload cannot break out into the shell. See `HOOK-3`.
+const HOOK_PAYLOAD_ENV: &str = "OPENHARNESS_HOOK_PAYLOAD";
+
 /// Context passed into hook execution.
 pub struct HookExecutionContext {
     pub cwd: PathBuf,
@@ -55,21 +64,57 @@ impl HookExecutor {
         event: HookEvent,
         payload: &serde_json::Value,
     ) -> HookResult {
-        let command = inject_arguments(&hook.command, payload);
+        // SECURITY (HOOK-3): the command string is run verbatim and is NEVER
+        // templated with the payload. The payload — which can carry
+        // model-influenced fields (tool inputs/outputs, prompt text) — reaches
+        // the hook only via the `OPENHARNESS_HOOK_PAYLOAD` env var and stdin, so
+        // it cannot be interpreted as shell syntax. We also use a non-login
+        // shell (`-c`, not `-lc`) to avoid sourcing the user's rc files.
+        let command = hook.command.clone();
+        let payload_json = payload.to_string();
         let mut env_vars = std::collections::HashMap::new();
-        env_vars.insert("OPENHARNESS_HOOK_EVENT".to_string(), event.to_string());
-        env_vars.insert("OPENHARNESS_HOOK_PAYLOAD".to_string(), payload.to_string());
+        env_vars.insert(HOOK_EVENT_ENV.to_string(), event.to_string());
+        env_vars.insert(HOOK_PAYLOAD_ENV.to_string(), payload_json.clone());
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(hook.timeout_seconds as u64),
             async {
-                let output = tokio::process::Command::new("/bin/bash")
-                    .arg("-lc")
+                use tokio::io::AsyncWriteExt;
+
+                let spawned = tokio::process::Command::new("/bin/bash")
+                    .arg("-c")
                     .arg(&command)
                     .current_dir(&self.context.cwd)
                     .envs(env_vars)
-                    .output()
-                    .await;
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+
+                let mut child = match spawned {
+                    Ok(child) => child,
+                    Err(e) => {
+                        return HookResult {
+                            hook_type: "command".into(),
+                            success: false,
+                            output: e.to_string(),
+                            blocked: hook.block_on_failure,
+                            reason: e.to_string(),
+                            ..Default::default()
+                        };
+                    }
+                };
+
+                // Feed the payload on stdin so hooks can consume it without it
+                // ever touching the command string. Best-effort: a hook that
+                // never reads stdin still works (the pipe is just dropped).
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(payload_json.as_bytes()).await;
+                    // Dropping `stdin` here closes the pipe so the child's read
+                    // of stdin reaches EOF instead of blocking.
+                }
+
+                let output = child.wait_with_output().await;
 
                 match output {
                     Ok(output) => {
@@ -499,6 +544,79 @@ mod tests {
         assert!(!result.results[0].success);
         assert!(!result.results[0].blocked);
         assert!(!result.blocked());
+    }
+
+    /// HOOK-3 regression: a payload carrying shell metacharacters must NOT be
+    /// interpreted by the shell. The command runs verbatim; the payload is only
+    /// available via the env var, so the injected `touch` never executes.
+    #[tokio::test]
+    async fn test_command_hook_payload_is_not_shell_injected() {
+        let tmp = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let canary = tmp.join(format!("oh_hook_canary_{}_{}", std::process::id(), unique));
+        let _ = std::fs::remove_file(&canary);
+        assert!(!canary.exists());
+
+        let mut reg = HookRegistry::new();
+        // The command itself is benign (`true`). The malicious shell lives in
+        // the payload; if it were interpolated into the command string it would
+        // create the canary file.
+        reg.register(HookEvent::PreToolUse, make_command_hook("true", 30, false));
+        let executor = make_executor(reg);
+
+        let evil = format!("$ARGUMENTS; touch {}", canary.display());
+        let payload = serde_json::json!({ "tool_name": evil });
+
+        let result = executor.execute(HookEvent::PreToolUse, payload).await;
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].success);
+        assert!(
+            !canary.exists(),
+            "payload was shell-injected — canary file was created"
+        );
+    }
+
+    /// The payload reaches a command hook via the env var (and stdin), not the
+    /// command string.
+    #[tokio::test]
+    async fn test_command_hook_receives_payload_via_env() {
+        let mut reg = HookRegistry::new();
+        reg.register(
+            HookEvent::PreToolUse,
+            make_command_hook("printf '%s' \"$OPENHARNESS_HOOK_PAYLOAD\"", 30, false),
+        );
+        let executor = make_executor(reg);
+
+        let payload = serde_json::json!({ "tool_name": "bash", "marker": "env-ok" });
+        let result = executor
+            .execute(HookEvent::PreToolUse, payload)
+            .await;
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].success);
+        assert!(result.results[0].output.contains("env-ok"));
+    }
+
+    /// The payload is also delivered on stdin for hooks that prefer to read it
+    /// there.
+    #[tokio::test]
+    async fn test_command_hook_receives_payload_via_stdin() {
+        let mut reg = HookRegistry::new();
+        reg.register(HookEvent::PreToolUse, make_command_hook("cat", 30, false));
+        let executor = make_executor(reg);
+
+        let payload = serde_json::json!({ "marker": "stdin-ok" });
+        let result = executor
+            .execute(HookEvent::PreToolUse, payload)
+            .await;
+
+        assert_eq!(result.results.len(), 1);
+        assert!(result.results[0].success);
+        assert!(result.results[0].output.contains("stdin-ok"));
     }
 
     // -- AggregatedHookResult tests --

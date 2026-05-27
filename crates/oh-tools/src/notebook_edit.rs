@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use oh_types::tools::{ToolExecutionContext, ToolResult};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct NotebookEditTool;
 
@@ -41,6 +41,14 @@ impl crate::traits::Tool for NotebookEditTool {
         false
     }
 
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("notebook_path")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     async fn execute(
         &self,
         arguments: serde_json::Value,
@@ -61,7 +69,14 @@ impl crate::traits::Tool for NotebookEditTool {
             None => return ToolResult::error("Missing required parameter: new_source"),
         };
 
-        let path = resolve_path(&context.cwd, notebook_path);
+        let path = match crate::pathsafe::resolve_and_confine(
+            &context.cwd,
+            notebook_path,
+            &context.allowed_roots,
+        ) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(e.to_string()),
+        };
 
         match edit_notebook_cell(&path, cell_index, new_source) {
             Ok(()) => {
@@ -69,15 +84,6 @@ impl crate::traits::Tool for NotebookEditTool {
             }
             Err(e) => ToolResult::error(format!("Failed to edit notebook: {}", e)),
         }
-    }
-}
-
-fn resolve_path(base: &Path, candidate: &str) -> PathBuf {
-    let p = PathBuf::from(candidate);
-    if p.is_absolute() {
-        p
-    } else {
-        base.join(p)
     }
 }
 

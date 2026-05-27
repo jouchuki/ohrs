@@ -2,9 +2,19 @@
 
 use async_trait::async_trait;
 use oh_types::tools::{ToolExecutionContext, ToolResult};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 pub struct FileReadTool;
+
+/// Default number of lines returned when no explicit limit is supplied.
+const DEFAULT_LINE_LIMIT: usize = 2000;
+/// Hard cap on bytes inspected for binary detection (null-byte scan).
+const BINARY_SNIFF_BYTES: usize = 8192;
+/// Hard cap on total bytes streamed into memory for a single read. This bounds
+/// the worst case (TOOL-9) even when the requested line range is enormous or
+/// the file has pathologically long lines.
+const MAX_READ_BYTES: usize = 10 * 1024 * 1024;
 
 #[async_trait]
 impl crate::traits::Tool for FileReadTool {
@@ -32,10 +42,18 @@ impl crate::traits::Tool for FileReadTool {
         true
     }
 
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: &ToolExecutionContext,
+        context: &ToolExecutionContext,
     ) -> ToolResult {
         let file_path = match arguments.get("file_path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -48,9 +66,18 @@ impl crate::traits::Tool for FileReadTool {
         let limit = arguments
             .get("limit")
             .and_then(|v| v.as_u64())
-            .unwrap_or(2000) as usize;
+            .unwrap_or(DEFAULT_LINE_LIMIT as u64) as usize;
 
-        let path = Path::new(file_path);
+        // TOOL-3 / TOOL-4: canonicalize the real target and confine to roots.
+        let path = match crate::pathsafe::resolve_and_confine(
+            &context.cwd,
+            file_path,
+            &context.allowed_roots,
+        ) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(e.to_string()),
+        };
+
         if !path.exists() {
             return ToolResult::error(format!("File not found: {}", file_path));
         }
@@ -58,34 +85,91 @@ impl crate::traits::Tool for FileReadTool {
             return ToolResult::error(format!("Cannot read directory: {}", file_path));
         }
 
-        let raw = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
-        };
-
-        // Check for null bytes in first 8KB to detect binary files
-        let check_len = raw.len().min(8192);
-        if raw[..check_len].contains(&0) {
-            return ToolResult::error(format!("Binary file cannot be read as text: {}", file_path));
-        }
-
-        let text = String::from_utf8_lossy(&raw);
-        let lines: Vec<&str> = text.lines().collect();
-        let end = (offset + limit).min(lines.len());
-        if offset >= lines.len() {
-            return ToolResult::success(format!(
+        match read_line_range(&path, offset, limit) {
+            Ok(ReadOutcome::Binary) => {
+                ToolResult::error(format!("Binary file cannot be read as text: {}", file_path))
+            }
+            Ok(ReadOutcome::OutOfRange) => ToolResult::success(format!(
                 "(no content in selected range for {})",
                 file_path
-            ));
+            )),
+            Ok(ReadOutcome::Lines { numbered, truncated }) => {
+                let mut body = numbered.join("\n");
+                if truncated {
+                    body.push_str("\n...[truncated: read byte cap reached]");
+                }
+                ToolResult::success(body)
+            }
+            Err(e) => ToolResult::error(format!("Failed to read file: {}", e)),
         }
-        let selected = &lines[offset..end];
-        let numbered: Vec<String> = selected
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}\t{}", offset + i + 1, line))
-            .collect();
-        ToolResult::success(numbered.join("\n"))
     }
+}
+
+/// Result of a bounded line-range read.
+enum ReadOutcome {
+    /// File detected as binary (null byte within the sniff window).
+    Binary,
+    /// The requested offset is past the end of the file.
+    OutOfRange,
+    /// Numbered lines and whether the byte cap forced an early stop.
+    Lines {
+        numbered: Vec<String>,
+        truncated: bool,
+    },
+}
+
+/// Stream a file line-by-line, materializing only `[offset, offset+limit)` and
+/// never reading more than [`MAX_READ_BYTES`] total (TOOL-9). Detects binary
+/// content from the leading bytes before emitting any text.
+fn read_line_range(path: &Path, offset: usize, limit: usize) -> std::io::Result<ReadOutcome> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+
+    // Binary sniff on the leading bytes without consuming the stream position
+    // beyond what we re-read below.
+    {
+        use std::io::Read;
+        let mut sniff = vec![0u8; BINARY_SNIFF_BYTES];
+        let n = (&mut reader).take(BINARY_SNIFF_BYTES as u64).read(&mut sniff)?;
+        if sniff[..n].contains(&0) {
+            return Ok(ReadOutcome::Binary);
+        }
+    }
+
+    // Re-open to read from the start now that the sniff consumed bytes.
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+
+    let end = offset.saturating_add(limit);
+    let mut numbered: Vec<String> = Vec::new();
+    let mut bytes_read: usize = 0;
+    let mut truncated = false;
+    let mut saw_any = false;
+
+    for (idx, line_result) in reader.lines().enumerate() {
+        saw_any = true;
+        if idx >= end {
+            break;
+        }
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => String::from_utf8_lossy(b"").to_string(),
+        };
+        bytes_read = bytes_read.saturating_add(line.len()).saturating_add(1);
+        if bytes_read > MAX_READ_BYTES {
+            truncated = true;
+            break;
+        }
+        if idx >= offset {
+            numbered.push(format!("{:>6}\t{}", idx + 1, line));
+        }
+    }
+
+    if saw_any && numbered.is_empty() && !truncated {
+        return Ok(ReadOutcome::OutOfRange);
+    }
+
+    Ok(ReadOutcome::Lines { numbered, truncated })
 }
 
 #[cfg(test)]

@@ -174,6 +174,12 @@ impl SubagentRunner for EngineSubagentRunner {
             // task control plane; those stay None to avoid unbounded recursion.
             subagents: None,
             tasks: None,
+            // Subagents get a fresh cancellation token and no runtime hook
+            // mutation / compactor by default (additive defaults for ENG-1/2,
+            // HOOK-1); the main run wires these.
+            cancel: oh_engine::CancellationToken::new(),
+            hook_registry: None,
+            compactor: None,
         };
 
         run_subagent(ctx, req.prompt)

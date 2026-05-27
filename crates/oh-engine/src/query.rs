@@ -4,10 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use futures::future::join_all;
 use oh_api::StreamingApiClient;
-use oh_hooks::{HookEvent, HookExecutorTrait};
-use oh_permissions::PermissionChecker;
+use oh_hooks::loader::HookRegistry;
+use oh_hooks::{AggregatedHookResult, HookEvent, HookExecutorTrait};
+use oh_permissions::{canonicalize_path, PermissionChecker};
+use oh_services::compact::{CompactRequest, CompactSummarizer, Compactor};
 use oh_tools::ToolRegistry;
 use oh_types::api::*;
 use oh_types::messages::*;
@@ -16,7 +19,81 @@ use oh_types::stream_events::*;
 use oh_types::subagent::{AgentId, BackgroundTasks, SubagentSpawner};
 use oh_types::tools::ToolExecutionContext;
 use opentelemetry::KeyValue;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
+
+/// Engine-level backstop cap on a single tool result's output (TOOL-9). Tools
+/// SHOULD cap their own output, but the engine enforces a uniform ceiling so a
+/// misbehaving tool can't balloon memory or the token budget. Chosen generously
+/// (~256 KiB) so legitimate large reads survive while pathological output
+/// (`cat /dev/urandom`, `yes`) is bounded.
+const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
+
+/// Marker appended when a tool result is truncated by the engine backstop.
+const TOOL_OUTPUT_TRUNCATION_MARKER: &str = "\n…[output truncated by engine backstop]";
+
+/// Number of recent messages the compactor preserves verbatim when it triggers
+/// (ENG-1). Everything older is replaced by a single summary message.
+const COMPACT_KEEP_LAST_N: usize = 6;
+
+/// Truncate `output` to the engine backstop cap (TOOL-9), snapping to a UTF-8
+/// char boundary so we never split a multi-byte sequence.
+fn enforce_output_cap(mut output: String) -> String {
+    if output.len() <= MAX_TOOL_OUTPUT_BYTES {
+        return output;
+    }
+    let mut end = MAX_TOOL_OUTPUT_BYTES;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.truncate(end);
+    output.push_str(TOOL_OUTPUT_TRUNCATION_MARKER);
+    output
+}
+
+/// Adapts the engine's [`StreamingApiClient`] into a [`CompactSummarizer`] so the
+/// compactor can summarize history with the same provider the run uses (ENG-1).
+struct ApiClientSummarizer {
+    api_client: Arc<dyn StreamingApiClient>,
+    model: String,
+}
+
+#[async_trait]
+impl CompactSummarizer for ApiClientSummarizer {
+    async fn summarize(
+        &self,
+        system: &str,
+        history: &str,
+    ) -> Result<String, oh_services::compact::CompactError> {
+        let request = ApiMessageRequest {
+            model: self.model.clone(),
+            messages: vec![ConversationMessage::from_user_text(history)],
+            system_prompt: Some(system.to_string()),
+            max_tokens: 2048,
+            tools: Vec::new(),
+        };
+        let mut stream = self
+            .api_client
+            .stream_message(request)
+            .await
+            .map_err(|e| oh_services::compact::CompactError::Summarizer(e.to_string()))?;
+
+        use futures::StreamExt;
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let Ok(ApiStreamEvent::MessageComplete(complete)) = event {
+                text = complete.message.text();
+            }
+        }
+        if text.is_empty() {
+            return Err(oh_services::compact::CompactError::Summarizer(
+                "summarizer returned no text".into(),
+            ));
+        }
+        Ok(text)
+    }
+}
 
 /// Callback type for permission prompts.
 pub type PermissionPromptFn = Arc<
@@ -60,13 +137,35 @@ pub struct QueryContext {
     /// Handle for the background-task control plane, threaded into the per-tool
     /// [`ToolExecutionContext`] for the `Task*` tools.
     pub tasks: Option<Arc<dyn BackgroundTasks>>,
+    /// Cooperative cancellation token (ENG-2 / contract C6). When cancelled, the
+    /// stream-consume loop and the tool-dispatch step abort gracefully. The
+    /// default token is never cancelled, so existing callers are unaffected.
+    pub cancel: CancellationToken,
+    /// Live hook registry (HOOK-1 / contract C7). When present,
+    /// [`apply_hook_action`] mutates it under the write lock so the `HookManage`
+    /// tool's add/clear actually take effect at runtime. `None` disables runtime
+    /// mutation (the action is logged only).
+    pub hook_registry: Option<Arc<RwLock<HookRegistry>>>,
+    /// Proactive context compactor (ENG-1). When present, the loop checks
+    /// [`Compactor::should_compact_full`] before each turn and, if over the
+    /// threshold, replaces the history with the compacted form and fires
+    /// [`HookEvent::ContextCompacted`]. `None` disables compaction.
+    pub compactor: Option<Arc<Compactor>>,
 }
 
 impl QueryContext {
-    /// Fire a hook if a hook executor is configured. No-op otherwise.
-    async fn fire_hook(&self, event: HookEvent, payload: serde_json::Value) {
+    /// Fire a hook if a hook executor is configured, returning the aggregate
+    /// result so callers can honor `.blocked()` (HOOK-2 / contract C7). Returns
+    /// an empty (non-blocking) aggregate when no executor is configured.
+    async fn fire_hook(
+        &self,
+        event: HookEvent,
+        payload: serde_json::Value,
+    ) -> AggregatedHookResult {
         if let Some(ref hook_executor) = self.hook_executor {
-            hook_executor.execute(event, payload).await;
+            hook_executor.execute(event, payload).await
+        } else {
+            AggregatedHookResult::default()
         }
     }
 }
@@ -96,11 +195,35 @@ pub async fn run_query(
     }
 
     for turn in 0..context.max_turns {
+        // ENG-2: bail out before starting a turn if cancellation was requested.
+        if context.cancel.is_cancelled() {
+            context
+                .fire_hook(
+                    HookEvent::QueryTurnEnd,
+                    serde_json::json!({"turn": turn, "cancelled": true}),
+                )
+                .await;
+            return Err(EngineError::Cancelled);
+        }
+
+        // ENG-1: proactive context compaction. Before sending the next turn,
+        // check whether the full request (history + system prompt + tool schemas)
+        // would exceed the threshold; if so, replace the history with the
+        // compacted form and fire `ContextCompacted`.
+        maybe_compact(context, messages).await;
+
         let span = info_span!("query_turn", turn.number = turn);
 
         let turn_events = async {
             context.fire_hook(HookEvent::QueryTurnStart, serde_json::json!({"turn": turn})).await;
-            context.fire_hook(HookEvent::PreApiRequest, serde_json::json!({"model": context.model, "turn": turn})).await;
+
+            // HOOK-2: a blocking PreApiRequest hook aborts the turn before any
+            // provider call (cost/latency/tokens) is incurred.
+            let pre_api = context.fire_hook(HookEvent::PreApiRequest, serde_json::json!({"model": context.model, "turn": turn})).await;
+            if pre_api.blocked() {
+                context.fire_hook(HookEvent::QueryTurnEnd, serde_json::json!({"turn": turn, "blocked": "pre_api_request"})).await;
+                return Err(EngineError::HookBlocked(pre_api.reason().to_string()));
+            }
 
             // Stream API request
             let request = ApiMessageRequest {
@@ -123,25 +246,37 @@ pub async fn run_query(
             let mut usage = UsageSnapshot::default();
             let mut turn_events = Vec::new();
 
-            while let Some(event) = stream.next().await {
-                match event {
-                    Ok(ApiStreamEvent::TextDelta(delta)) => {
-                        turn_events.push((
-                            StreamEvent::AssistantTextDelta(AssistantTextDelta {
-                                text: delta.text,
-                            }),
-                            None,
-                        ));
+            // ENG-2: consume the stream under cancellation. If the token fires
+            // mid-stream we drop the stream (closing the connection) and abort.
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = context.cancel.cancelled() => {
+                        tracing::info!(turn, "query cancelled while consuming stream");
+                        return Err(EngineError::Cancelled);
                     }
-                    Ok(ApiStreamEvent::MessageComplete(complete)) => {
-                        final_message = Some(complete.message);
-                        usage = complete.usage;
-                    }
-                    Ok(ApiStreamEvent::ToolUseDelta(_)) => {
-                        // Tool-use delta events are not yet processed; skip.
-                    }
-                    Err(e) => {
-                        return Err(EngineError::ApiError(e.to_string()));
+                    next = stream.next() => {
+                        match next {
+                            None => break,
+                            Some(Ok(ApiStreamEvent::TextDelta(delta))) => {
+                                turn_events.push((
+                                    StreamEvent::AssistantTextDelta(AssistantTextDelta {
+                                        text: delta.text,
+                                    }),
+                                    None,
+                                ));
+                            }
+                            Some(Ok(ApiStreamEvent::MessageComplete(complete))) => {
+                                final_message = Some(complete.message);
+                                usage = complete.usage;
+                            }
+                            Some(Ok(ApiStreamEvent::ToolUseDelta(_))) => {
+                                // Tool-use delta events are not yet processed; skip.
+                            }
+                            Some(Err(e)) => {
+                                return Err(EngineError::ApiError(e.to_string()));
+                            }
+                        }
                     }
                 }
             }
@@ -171,7 +306,13 @@ pub async fn run_query(
                 "content": final_message.content.iter().map(oh_types::messages::serialize_content_block).collect::<Vec<_>>(),
             })).await;
 
-            context.fire_hook(HookEvent::PrePushMessage, serde_json::json!({"role": "assistant", "turn": turn})).await;
+            // HOOK-2: a blocking PrePushMessage hook prevents appending the
+            // assistant message and aborts the turn (e.g. an output-policy hook).
+            let pre_push = context.fire_hook(HookEvent::PrePushMessage, serde_json::json!({"role": "assistant", "turn": turn})).await;
+            if pre_push.blocked() {
+                context.fire_hook(HookEvent::QueryTurnEnd, serde_json::json!({"turn": turn, "blocked": "pre_push_assistant"})).await;
+                return Err(EngineError::HookBlocked(pre_push.reason().to_string()));
+            }
             messages.push(final_message.clone());
             context.fire_hook(HookEvent::PostPushMessage, serde_json::json!({"role": "assistant", "turn": turn})).await;
 
@@ -201,7 +342,14 @@ pub async fn run_query(
                     None,
                 ));
 
-                let result = execute_tool_call(context, &tc.name, &tc.id, &tc.input).await;
+                let result = tokio::select! {
+                    biased;
+                    _ = context.cancel.cancelled() => {
+                        tracing::info!(turn, "query cancelled during tool dispatch");
+                        return Err(EngineError::Cancelled);
+                    }
+                    result = execute_tool_call(context, &tc.name, &tc.id, &tc.input) => result,
+                };
 
                 turn_events.push((
                     StreamEvent::ToolExecutionCompleted(ToolExecutionCompleted {
@@ -225,12 +373,21 @@ pub async fn run_query(
                     ));
                 }
 
-                // Execute concurrently
+                // Execute concurrently, under cancellation (ENG-2): if the token
+                // fires while tools are running we drop the in-flight dispatch
+                // and abort the turn.
                 let futures: Vec<_> = tool_calls
                     .iter()
                     .map(|tc| execute_tool_call(context, &tc.name, &tc.id, &tc.input))
                     .collect();
-                let results = join_all(futures).await;
+                let results = tokio::select! {
+                    biased;
+                    _ = context.cancel.cancelled() => {
+                        tracing::info!(turn, "query cancelled during tool dispatch");
+                        return Err(EngineError::Cancelled);
+                    }
+                    results = join_all(futures) => results,
+                };
 
                 // Emit completion events
                 for (tc, result) in tool_calls.iter().zip(results.iter()) {
@@ -275,6 +432,66 @@ pub async fn run_query(
     }
 
     Err(EngineError::MaxTurnsExceeded(context.max_turns))
+}
+
+/// ENG-1: proactive context compaction. If a compactor is configured and the
+/// estimated full-request size exceeds its threshold, summarize the older
+/// history, replace `messages` with the compacted form, and fire
+/// [`HookEvent::ContextCompacted`]. A compaction failure (too few messages, or a
+/// summarizer error) is logged and left non-fatal — the turn proceeds with the
+/// uncompacted history and the provider's own limit becomes the backstop.
+async fn maybe_compact(context: &QueryContext, messages: &mut Vec<ConversationMessage>) {
+    let Some(ref compactor) = context.compactor else {
+        return;
+    };
+
+    // Approximate the serialized tool-schema size so the estimate reflects the
+    // whole request, not just the message history.
+    let tool_schemas_chars: usize = context
+        .tool_registry
+        .to_api_schema()
+        .iter()
+        .map(|s| s.to_string().len())
+        .sum();
+
+    if !compactor.should_compact_full(messages, &context.system_prompt, tool_schemas_chars) {
+        return;
+    }
+
+    let summarizer = ApiClientSummarizer {
+        api_client: context.api_client.clone(),
+        model: context.model.clone(),
+    };
+
+    let req = CompactRequest {
+        messages,
+        keep_last_n: COMPACT_KEEP_LAST_N,
+        system_prompt: &context.system_prompt,
+    };
+
+    match compactor.compact(req, &summarizer).await {
+        Ok(result) => {
+            tracing::info!(
+                before = result.estimated_tokens_before,
+                after = result.estimated_tokens_after,
+                "context compacted"
+            );
+            context
+                .fire_hook(
+                    HookEvent::ContextCompacted,
+                    serde_json::json!({
+                        "estimated_tokens_before": result.estimated_tokens_before,
+                        "estimated_tokens_after": result.estimated_tokens_after,
+                        "kept_messages": result.kept_messages.len(),
+                    }),
+                )
+                .await;
+            *messages = result.kept_messages;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "context compaction skipped");
+        }
+    }
 }
 
 /// Run a subagent: a nested [`run_query`] carrying its own [`QueryContext`]
@@ -380,24 +597,68 @@ async fn execute_tool_call(
             }
         };
 
-        // Permission check
-        let file_path = tool_input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        // Permission check (TOOL-1/TOOL-3/TOOL-4, contract C3/C4).
+        //
+        // Enumerate EVERY filesystem path the tool would touch via the trait
+        // method `path_args` (not just the conventional `file_path` key, which
+        // tools like NotebookEdit don't use), and check each — canonicalized
+        // against the tool cwd and confined to `allowed_roots` — through
+        // `evaluate_with_base`. The first denial wins. Tools with no path args
+        // still get one mode/command evaluation.
         let command = tool_input
             .get("command")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let is_read_only = tool.is_read_only(&input_value);
+        let path_args = tool.path_args(&input_value);
+        let allowed_roots = vec![context.cwd.clone()];
 
-        context.fire_hook(HookEvent::PrePermissionCheck, serde_json::json!({"tool_name": tool_name})).await;
+        context.fire_hook(HookEvent::PrePermissionCheck, serde_json::json!({"tool_name": tool_name, "paths": path_args})).await;
 
-        let decision = context.permission_checker.evaluate(&PermissionRequest {
-            tool_name,
-            is_read_only: tool.is_read_only(&input_value),
-            file_path: file_path.as_deref(),
-            command: command.as_deref(),
-        });
+        let decision = if path_args.is_empty() {
+            // No path-bearing args: a single mode/command evaluation.
+            context.permission_checker.evaluate_with_base(
+                &PermissionRequest {
+                    tool_name,
+                    is_read_only,
+                    file_path: None,
+                    command: command.as_deref(),
+                },
+                &context.cwd,
+                &allowed_roots,
+            )
+        } else {
+            // Check each path; deny on the first that fails. The command is
+            // carried on the first request so command deny rules still apply.
+            let mut first_allow: Option<oh_types::permissions::PermissionDecision> = None;
+            let mut denied: Option<oh_types::permissions::PermissionDecision> = None;
+            for (i, raw) in path_args.iter().enumerate() {
+                // Canonicalize for the trace/log; the checker re-canonicalizes
+                // internally against the same base.
+                let resolved = canonicalize_path(raw, &context.cwd);
+                tracing::debug!(tool = tool_name, path = %raw, resolved = %resolved.display(), "permission path check");
+                let d = context.permission_checker.evaluate_with_base(
+                    &PermissionRequest {
+                        tool_name,
+                        is_read_only,
+                        file_path: Some(raw.as_str()),
+                        command: if i == 0 { command.as_deref() } else { None },
+                    },
+                    &context.cwd,
+                    &allowed_roots,
+                );
+                if !d.allowed {
+                    denied = Some(d);
+                    break;
+                }
+                if first_allow.is_none() {
+                    first_allow = Some(d);
+                }
+            }
+            denied
+                .or(first_allow)
+                .unwrap_or_else(|| oh_types::permissions::PermissionDecision::allow("no paths"))
+        };
 
         context.fire_hook(HookEvent::PostPermissionCheck, serde_json::json!({
             "tool_name": tool_name,
@@ -434,12 +695,15 @@ async fn execute_tool_call(
             }
         }
 
-        // Execute tool
+        // Execute tool. The per-tool context carries the cwd as the single
+        // allowed root (contract C4) so file tools confine themselves to the job
+        // working directory in addition to the engine-side gate above.
         let tool_ctx = ToolExecutionContext {
             cwd: context.cwd.clone(),
             metadata: context.tool_metadata.clone(),
             subagents: context.subagents.clone(),
             tasks: context.tasks.clone(),
+            allowed_roots: allowed_roots.clone(),
         };
         let result = tool.execute(input_value, &tool_ctx).await;
 
@@ -448,12 +712,16 @@ async fn execute_tool_call(
             apply_hook_action(context, hook_action).await;
         }
 
-        let tool_result = ToolResultBlock::new(tool_use_id, &result.output, result.is_error);
+        // TOOL-9: engine-level backstop cap on tool output, regardless of
+        // whether the tool capped its own output.
+        let is_error = result.is_error;
+        let capped_output = enforce_output_cap(result.output);
+        let tool_result = ToolResultBlock::new(tool_use_id, &capped_output, is_error);
 
-        if result.is_error {
+        if is_error {
             context.fire_hook(HookEvent::ToolError_, serde_json::json!({
                 "tool_name": tool_name,
-                "error": result.output,
+                "error": capped_output,
             })).await;
         }
 
@@ -487,6 +755,14 @@ async fn execute_tool_call(
 }
 
 /// Apply a hook mutation from a tool result (e.g., HookManage tool).
+///
+/// HOOK-1 (contract C7): `add`/`clear_event`/`clear_all` actually mutate the
+/// live [`HookRegistry`] under its write lock when a `hook_registry` handle is
+/// threaded into the [`QueryContext`]. Without a handle the action is logged
+/// only (no-op), preserving back-compat for contexts that don't expose the
+/// registry. The `clear` direction is the dangerous one — a `clear` that reports
+/// success while a blocking safety hook stays live would be a false guarantee —
+/// so it now genuinely removes hooks.
 async fn apply_hook_action(context: &QueryContext, action: &serde_json::Value) {
     let action_type = action.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -496,37 +772,55 @@ async fn apply_hook_action(context: &QueryContext, action: &serde_json::Value) {
                 action.get("event").and_then(|v| v.as_str()),
                 action.get("hook"),
             ) {
-                if let (Ok(_event), Ok(hook)) = (
+                if let (Ok(event), Ok(hook)) = (
                     serde_json::from_value::<HookEvent>(serde_json::Value::String(
                         event_str.to_string(),
                     )),
                     serde_json::from_value::<oh_types::hooks::HookDefinition>(hook_value.clone()),
                 ) {
-                    if let Some(ref executor) = context.hook_executor {
-                        // Access the registry via the executor's public handle
-                        // For now, fire a hook to signal the addition
-                        executor
-                            .execute(
-                                HookEvent::PluginLoaded,
-                                serde_json::json!({
-                                    "source": "hook_manage",
-                                    "event": event_str,
-                                    "hook_type": hook.hook_type(),
-                                }),
-                            )
-                            .await;
+                    let hook_type = hook.hook_type().to_string();
+                    if let Some(ref registry) = context.hook_registry {
+                        registry.write().await.register(event, hook);
+                        tracing::info!(event = %event_str, hook_type = %hook_type, "Hook registered via HookManage tool (registry mutated)");
+                        if let Some(ref executor) = context.hook_executor {
+                            executor
+                                .execute(
+                                    HookEvent::PluginLoaded,
+                                    serde_json::json!({
+                                        "source": "hook_manage",
+                                        "event": event_str,
+                                        "hook_type": hook_type,
+                                    }),
+                                )
+                                .await;
+                        }
+                    } else {
+                        tracing::warn!(event = %event_str, hook_type, "HookManage add ignored: no registry handle in QueryContext");
                     }
-                    tracing::info!(event = %event_str, hook_type = hook.hook_type(), "Hook registered via HookManage tool");
                 }
             }
         }
         "clear_event" => {
             if let Some(event_str) = action.get("event").and_then(|v| v.as_str()) {
-                tracing::info!(event = %event_str, "Hooks cleared for event via HookManage tool");
+                if let Ok(event) = serde_json::from_value::<HookEvent>(serde_json::Value::String(
+                    event_str.to_string(),
+                )) {
+                    if let Some(ref registry) = context.hook_registry {
+                        registry.write().await.clear_event(&event);
+                        tracing::info!(event = %event_str, "Hooks cleared for event via HookManage tool (registry mutated)");
+                    } else {
+                        tracing::warn!(event = %event_str, "HookManage clear_event ignored: no registry handle in QueryContext");
+                    }
+                }
             }
         }
         "clear_all" => {
-            tracing::info!("All hooks cleared via HookManage tool");
+            if let Some(ref registry) = context.hook_registry {
+                registry.write().await.clear_all();
+                tracing::info!("All hooks cleared via HookManage tool (registry mutated)");
+            } else {
+                tracing::warn!("HookManage clear_all ignored: no registry handle in QueryContext");
+            }
         }
         "fire_event" => {
             // A tool requests that a lifecycle hook be fired with a payload —
@@ -560,6 +854,13 @@ pub enum EngineError {
     NoResponse,
     #[error("exceeded maximum turn limit ({0})")]
     MaxTurnsExceeded(u32),
+    /// The run was cancelled cooperatively via the [`QueryContext`] token
+    /// (ENG-2 / contract C6).
+    #[error("query cancelled")]
+    Cancelled,
+    /// A blocking `Pre*` hook aborted the turn (HOOK-2 / contract C7).
+    #[error("blocked by hook: {0}")]
+    HookBlocked(String),
 }
 
 #[cfg(test)]
@@ -638,6 +939,9 @@ mod tests {
             session_id: Some("sess-1".into()),
             subagents: None,
             tasks: None,
+            cancel: CancellationToken::new(),
+            hook_registry: None,
+            compactor: None,
         }
     }
 
@@ -807,6 +1111,9 @@ mod tests {
             session_id: Some("sess-block".into()),
             subagents: None,
             tasks: None,
+            cancel: CancellationToken::new(),
+            hook_registry: None,
+            compactor: None,
         }
     }
 
@@ -861,6 +1168,194 @@ mod tests {
                 .count()
                 == 1,
             "webhook should be invoked once on SubagentStop: {seen:?}"
+        );
+    }
+
+    // ── ENG-2: cancellation aborts a turn ────────────────────────────────────
+
+    /// A client whose stream never completes (yields a delta then pends
+    /// forever), so the only way `run_query` returns is via cancellation.
+    struct HangingClient;
+
+    #[async_trait]
+    impl StreamingApiClient for HangingClient {
+        async fn stream_message(
+            &self,
+            _request: ApiMessageRequest,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<ApiStreamEvent, ApiError>> + Send + '_>>,
+            ApiError,
+        > {
+            use futures::StreamExt;
+            // One delta, then a pending-forever stream: no MessageComplete.
+            let head = futures::stream::iter(vec![Ok(ApiStreamEvent::TextDelta(
+                ApiTextDeltaEvent { text: "…".into() },
+            ))]);
+            let tail = futures::stream::pending::<Result<ApiStreamEvent, ApiError>>();
+            Ok(Box::pin(head.chain(tail)))
+        }
+    }
+
+    fn cancellable_ctx(cancel: CancellationToken) -> QueryContext {
+        QueryContext {
+            api_client: Arc::new(HangingClient),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            permission_checker: Arc::new(PermissionChecker::new(PermissionSettings::default())),
+            cwd: PathBuf::from("/tmp"),
+            model: "test-model".into(),
+            system_prompt: "test".into(),
+            max_tokens: 1024,
+            permission_prompt: None,
+            ask_user_prompt: None,
+            max_turns: 5,
+            hook_executor: None,
+            tool_metadata: std::collections::HashMap::new(),
+            agent_id: AgentId::new("cancel"),
+            parent_id: None,
+            session_id: None,
+            subagents: None,
+            tasks: None,
+            cancel,
+            hook_registry: None,
+            compactor: None,
+        }
+    }
+
+    /// ENG-2: cancelling the token while a turn's stream is in flight aborts the
+    /// run with `EngineError::Cancelled` instead of hanging forever.
+    #[tokio::test]
+    async fn test_cancellation_aborts_in_flight_turn() {
+        let cancel = CancellationToken::new();
+        let ctx = cancellable_ctx(cancel.clone());
+        let mut messages = vec![ConversationMessage::from_user_text("hi")];
+
+        // Cancel shortly after the run starts consuming the (hanging) stream.
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let result = run_query(&ctx, &mut messages).await;
+        assert!(
+            matches!(result, Err(EngineError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
+    }
+
+    /// ENG-2: a token cancelled BEFORE the run starts aborts at the turn guard,
+    /// before any provider call.
+    #[tokio::test]
+    async fn test_precancelled_token_aborts_before_first_turn() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let ctx = cancellable_ctx(cancel);
+        let mut messages = vec![ConversationMessage::from_user_text("hi")];
+        let result = run_query(&ctx, &mut messages).await;
+        assert!(matches!(result, Err(EngineError::Cancelled)));
+    }
+
+    // ── HOOK-2: a blocking PreApiRequest hook aborts the turn ────────────────
+
+    /// HOOK-2: a hook that blocks `PreApiRequest` must abort the turn with
+    /// `HookBlocked` — the provider is never called, and no assistant message is
+    /// appended.
+    #[tokio::test]
+    async fn test_blocking_pre_api_request_aborts_turn() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let hooks = Arc::new(BlockingHookExecutor {
+            block_on: HookEvent::PreApiRequest,
+            events: Arc::clone(&events),
+        });
+        // FakeApiClient would return text if reached; the block must prevent that.
+        let ctx = QueryContext {
+            api_client: Arc::new(FakeApiClient {
+                text: "should not appear".into(),
+            }),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            permission_checker: Arc::new(PermissionChecker::new(PermissionSettings::default())),
+            cwd: PathBuf::from("/tmp"),
+            model: "test-model".into(),
+            system_prompt: "test".into(),
+            max_tokens: 1024,
+            permission_prompt: None,
+            ask_user_prompt: None,
+            max_turns: 5,
+            hook_executor: Some(hooks),
+            tool_metadata: std::collections::HashMap::new(),
+            agent_id: AgentId::new("hook-block"),
+            parent_id: None,
+            session_id: None,
+            subagents: None,
+            tasks: None,
+            cancel: CancellationToken::new(),
+            hook_registry: None,
+            compactor: None,
+        };
+        let mut messages = vec![ConversationMessage::from_user_text("hi")];
+        let result = run_query(&ctx, &mut messages).await;
+        assert!(
+            matches!(result, Err(EngineError::HookBlocked(_))),
+            "expected HookBlocked, got {result:?}"
+        );
+        // No assistant message should have been appended.
+        assert!(
+            !messages.iter().any(|m| m.role == Role::Assistant),
+            "assistant message appended despite PreApiRequest block"
+        );
+    }
+
+    // ── ENG-1: proactive compaction triggers ─────────────────────────────────
+
+    /// ENG-1: with a compactor whose threshold is below the seeded history size,
+    /// `run_query` compacts the history before the first turn, fires
+    /// `ContextCompacted`, and shrinks the message count.
+    #[tokio::test]
+    async fn test_compaction_triggers_before_turn() {
+        use oh_services::compact::Compactor;
+
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        // A compactor with a tiny threshold so the seeded history exceeds it.
+        // keep_last_n in run_query is COMPACT_KEEP_LAST_N (6); seed enough
+        // messages that compaction has something to summarize. The summarizer is
+        // the run's own api_client (ApiClientSummarizer); FakeApiClient returns
+        // fixed text, which serves as both the summary and the assistant reply.
+        let compactor = Arc::new(Compactor::new(1, 1));
+
+        let mut ctx = make_ctx("final answer", Arc::clone(&events));
+        ctx.compactor = Some(compactor);
+
+        // Seed a long history (> keep_last_n) so compaction has a summarize span.
+        let mut messages: Vec<ConversationMessage> = (0..12)
+            .map(|i| {
+                if i % 2 == 0 {
+                    ConversationMessage::from_user_text(format!("user turn {i} {}", "x".repeat(50)))
+                } else {
+                    ConversationMessage {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text(TextBlock::new(format!(
+                            "assistant turn {i} {}",
+                            "y".repeat(50)
+                        )))],
+                    }
+                }
+            })
+            .collect();
+        let before = messages.len();
+
+        let _ = run_query(&ctx, &mut messages).await.unwrap();
+
+        let seen = events.lock().unwrap();
+        assert!(
+            seen.contains(&HookEvent::ContextCompacted),
+            "ContextCompacted hook should have fired: {seen:?}"
+        );
+        // After compaction the history is the summary + kept tail (+ the new
+        // assistant turn from this run), which is smaller than the seeded 12.
+        assert!(
+            messages.len() < before + 1,
+            "history should have shrunk via compaction (before={before}, after={})",
+            messages.len()
         );
     }
 }

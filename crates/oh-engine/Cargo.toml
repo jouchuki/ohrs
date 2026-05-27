@@ -12,7 +12,9 @@ oh-api.workspace = true
 oh-tools.workspace = true
 oh-hooks.workspace = true
 oh-permissions.workspace = true
+oh-services.workspace = true
 tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
 futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -23,4 +25,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 oh-config.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "rt-multi-thread"] }

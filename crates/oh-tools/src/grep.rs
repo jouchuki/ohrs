@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 pub struct GrepTool;
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
+/// Hard cap on the total bytes of grep output accumulated in memory (TOOL-9).
+/// Guards against pathologically long matching lines blowing the token budget
+/// even when the line count stays under `head_limit`.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn resolve_path(base: &Path, candidate: Option<&str>) -> PathBuf {
     match candidate {
@@ -146,6 +150,15 @@ impl crate::traits::Tool for GrepTool {
         true
     }
 
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     async fn execute(
         &self,
         arguments: serde_json::Value,
@@ -198,9 +211,15 @@ impl crate::traits::Tool for GrepTool {
 
         let files = walk_files(&search_dir);
         let mut output_lines: Vec<String> = Vec::new();
+        let mut output_bytes: usize = 0;
+        let mut byte_capped = false;
 
         for file_path in &files {
             if output_lines.len() >= head_limit {
+                break;
+            }
+            if output_bytes >= MAX_OUTPUT_BYTES {
+                byte_capped = true;
                 break;
             }
 
@@ -230,6 +249,7 @@ impl crate::traits::Tool for GrepTool {
             let text = String::from_utf8_lossy(&raw);
             let all_lines: Vec<&str> = text.lines().collect();
             let rel_display = rel_path.to_string_lossy();
+            let lines_before = output_lines.len();
 
             match output_mode {
                 "files_with_matches" => {
@@ -282,6 +302,17 @@ impl crate::traits::Tool for GrepTool {
                     }
                 }
             }
+
+            // TOOL-9: account the bytes added by this file and stop early if the
+            // total output would exceed the in-memory cap.
+            output_bytes += output_lines[lines_before..]
+                .iter()
+                .map(|l| l.len() + 1)
+                .sum::<usize>();
+        }
+
+        if byte_capped || output_bytes >= MAX_OUTPUT_BYTES {
+            output_lines.push("...[truncated: grep output byte cap reached]".to_string());
         }
 
         if output_lines.is_empty() {
