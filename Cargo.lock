@@ -1449,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "oh-api"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "oh-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "dirs",
  "oh-types",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "oh-engine"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "oh-harness"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "oh-hooks"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "oh-mcp"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "http",
  "oh-telemetry",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "oh-permissions"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "globset",
  "oh-config",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "oh-plugin-abi"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "oh-plugin-derive"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "oh-plugins"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "libloading",
  "oh-config",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "oh-services"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1645,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "oh-swarm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "oh-telemetry"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "opentelemetry 0.27.1",
  "opentelemetry-otlp",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "oh-tools"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "oh-types"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "serde",
