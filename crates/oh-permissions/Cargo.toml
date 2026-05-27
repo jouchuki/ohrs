@@ -12,3 +12,4 @@ oh-telemetry.workspace = true
 tracing.workspace = true
 globset.workspace = true
 opentelemetry.workspace = true
+shlex = "1.3"

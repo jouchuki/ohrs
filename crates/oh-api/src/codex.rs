@@ -462,7 +462,11 @@ fn append_input_items(msg: &ConversationMessage, out: &mut Vec<Value>) {
 struct ResponsesResult {
     text: String,
     /// Keyed by item_id (e.g. "fc_...") which delta events reference.
-    pending: std::collections::HashMap<String, PendingToolCall>,
+    ///
+    /// An `IndexMap` preserves insertion (i.e. `response.output_item.added`)
+    /// order so multiple tool calls are assembled deterministically across
+    /// runs (ENG-9). A plain `HashMap::into_values()` yielded arbitrary order.
+    pending: indexmap::IndexMap<String, PendingToolCall>,
     input_tokens: u64,
     output_tokens: u64,
     stop_reason: Option<String>,
@@ -947,6 +951,38 @@ mod tests {
             other => panic!("expected ToolUseDelta, got {:?}", other),
         }
         assert!(matches!(&events[2], Ok(ApiStreamEvent::MessageComplete(_))));
+    }
+
+    /// ENG-9: two tool calls added in order fc_1 then fc_2 must be assembled
+    /// in that same order, deterministically (IndexMap, not HashMap).
+    #[tokio::test]
+    async fn test_parse_sse_multi_tool_call_preserves_order() {
+        let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+            Ok(bytes::Bytes::from_static(
+                b"event: response.output_item.added\ndata: {\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"alpha\"}}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.output_item.added\ndata: {\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_2\",\"name\":\"beta\"}}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_1\",\"delta\":\"{}\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_2\",\"delta\":\"{}\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            )),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let events = parse_sse_stream(stream).await.unwrap();
+        let complete = expect_complete(&events);
+        let tus = complete.message.tool_uses();
+        assert_eq!(tus.len(), 2);
+        assert_eq!(tus[0].name, "alpha");
+        assert_eq!(tus[0].id, "call_1");
+        assert_eq!(tus[1].name, "beta");
+        assert_eq!(tus[1].id, "call_2");
     }
 
     #[test]

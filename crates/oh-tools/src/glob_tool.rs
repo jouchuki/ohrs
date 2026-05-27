@@ -47,6 +47,15 @@ impl crate::traits::Tool for GlobTool {
         true
     }
 
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     async fn execute(
         &self,
         arguments: serde_json::Value,

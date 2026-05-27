@@ -83,15 +83,92 @@ impl ToolResultBlock {
 }
 
 /// A content block in a conversation message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type")]
+///
+/// Deserialization is tolerant of unknown `type` discriminators (ENG-8): a
+/// block whose `type` is not one of the known variants (e.g. `thinking`,
+/// `image`, or a future provider-specific block) is captured verbatim in
+/// [`ContentBlock::Other`] instead of failing the whole message. This keeps
+/// session resume, trajectory replay, and hook payloads robust against block
+/// types we don't model.
+///
+/// **Provenance rule:** an `Other` block is opaque and provider-specific, so it
+/// is never re-serialized back onto the provider wire (`serialize_content_block`
+/// / `to_api_param` skip it). Re-sending an unknown block to a provider that did
+/// not originate it would be rejected; we drop it rather than guess its shape.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ContentBlock {
-    #[serde(rename = "text")]
     Text(TextBlock),
-    #[serde(rename = "tool_use")]
     ToolUse(ToolUseBlock),
-    #[serde(rename = "tool_result")]
     ToolResult(ToolResultBlock),
+    /// An unknown / unmodeled content block, captured verbatim. Not sent back
+    /// to providers.
+    Other(serde_json::Value),
+}
+
+/// The `type` discriminator values that map to a concrete [`ContentBlock`]
+/// variant. Anything else deserializes into [`ContentBlock::Other`].
+const CONTENT_BLOCK_TYPE_TEXT: &str = "text";
+const CONTENT_BLOCK_TYPE_TOOL_USE: &str = "tool_use";
+const CONTENT_BLOCK_TYPE_TOOL_RESULT: &str = "tool_result";
+
+impl Serialize for ContentBlock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Round-trip through the provider wire form. `Other` blocks serialize to
+        // their captured JSON verbatim (so on-disk round-trips of e.g. a session
+        // file are lossless); the provider-wire helpers
+        // (`serialize_content_block`) are what enforce the "don't re-send"
+        // provenance rule.
+        match self {
+            ContentBlock::Text(t) => serde_json::json!({
+                "type": CONTENT_BLOCK_TYPE_TEXT,
+                "text": t.text,
+            })
+            .serialize(serializer),
+            ContentBlock::ToolUse(t) => serde_json::json!({
+                "type": CONTENT_BLOCK_TYPE_TOOL_USE,
+                "id": t.id,
+                "name": t.name,
+                "input": t.input,
+            })
+            .serialize(serializer),
+            ContentBlock::ToolResult(t) => serde_json::json!({
+                "type": CONTENT_BLOCK_TYPE_TOOL_RESULT,
+                "tool_use_id": t.tool_use_id,
+                "content": t.content,
+                "is_error": t.is_error,
+            })
+            .serialize(serializer),
+            ContentBlock::Other(v) => v.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize into an untyped value first, then dispatch on the `type`
+        // tag. Unknown tags (or a missing tag) fall through to `Other`, which is
+        // the whole point of ENG-8: never hard-error on an unmodeled block.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let tag = value.get("type").and_then(|t| t.as_str());
+        match tag {
+            Some(CONTENT_BLOCK_TYPE_TEXT) => serde_json::from_value(value)
+                .map(ContentBlock::Text)
+                .map_err(serde::de::Error::custom),
+            Some(CONTENT_BLOCK_TYPE_TOOL_USE) => serde_json::from_value(value)
+                .map(ContentBlock::ToolUse)
+                .map_err(serde::de::Error::custom),
+            Some(CONTENT_BLOCK_TYPE_TOOL_RESULT) => serde_json::from_value(value)
+                .map(ContentBlock::ToolResult)
+                .map_err(serde::de::Error::custom),
+            _ => Ok(ContentBlock::Other(value)),
+        }
+    }
 }
 
 /// Message role.
@@ -143,15 +220,28 @@ impl ConversationMessage {
     }
 
     /// Convert the message into Anthropic SDK message params.
+    ///
+    /// `Other` (unknown) blocks are dropped here (ENG-8 provenance rule): they
+    /// originate from a different provider/shape and must not be re-sent on the
+    /// wire, where they would be rejected.
     pub fn to_api_param(&self) -> serde_json::Value {
         serde_json::json!({
             "role": self.role,
-            "content": self.content.iter().map(serialize_content_block).collect::<Vec<_>>(),
+            "content": self
+                .content
+                .iter()
+                .filter_map(provider_content_block)
+                .collect::<Vec<_>>(),
         })
     }
 }
 
 /// Convert a local content block into the provider wire format.
+///
+/// Returns the JSON for the three modeled block types. An [`ContentBlock::Other`]
+/// is serialized to its captured value verbatim — this is the lossless,
+/// observability-facing form (hook payloads, logs). For the *provider wire*, use
+/// [`provider_content_block`], which drops `Other` per the provenance rule.
 pub fn serialize_content_block(block: &ContentBlock) -> serde_json::Value {
     match block {
         ContentBlock::Text(t) => serde_json::json!({
@@ -170,6 +260,17 @@ pub fn serialize_content_block(block: &ContentBlock) -> serde_json::Value {
             "content": t.content,
             "is_error": t.is_error,
         }),
+        ContentBlock::Other(v) => v.clone(),
+    }
+}
+
+/// Provider-wire form of a content block, honoring the ENG-8 provenance rule:
+/// returns `None` for [`ContentBlock::Other`] so unknown blocks that a provider
+/// did not originate are never re-sent to it.
+pub fn provider_content_block(block: &ContentBlock) -> Option<serde_json::Value> {
+    match block {
+        ContentBlock::Other(_) => None,
+        known => Some(serialize_content_block(known)),
     }
 }
 
@@ -347,5 +448,74 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ConversationMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, deser);
+    }
+
+    // ── ENG-8: unknown content blocks deserialize into `Other` ───────────────
+
+    #[test]
+    fn test_unknown_block_type_deserializes_to_other() {
+        // A `thinking` block (not modeled) must not error the whole message.
+        let json = r#"{"type":"thinking","thinking":"hmm","signature":"abc"}"#;
+        let deser: ContentBlock = serde_json::from_str(json).unwrap();
+        match deser {
+            ContentBlock::Other(v) => {
+                assert_eq!(v["type"], "thinking");
+                assert_eq!(v["thinking"], "hmm");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_message_with_unknown_block_deserializes() {
+        // A whole message mixing a known text block and an unknown image block
+        // must deserialize cleanly (session resume / trajectory replay).
+        let json = r#"{
+            "role":"assistant",
+            "content":[
+                {"type":"text","text":"here is an image"},
+                {"type":"image","source":{"type":"base64","data":"AAAA"}}
+            ]
+        }"#;
+        let msg: ConversationMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.len(), 2);
+        assert!(matches!(msg.content[0], ContentBlock::Text(_)));
+        assert!(matches!(msg.content[1], ContentBlock::Other(_)));
+        // Known text still extracts.
+        assert_eq!(msg.text(), "here is an image");
+    }
+
+    #[test]
+    fn test_unknown_block_roundtrips_verbatim() {
+        let json = r#"{"type":"thinking","thinking":"deep","extra":42}"#;
+        let block: ContentBlock = serde_json::from_str(json).unwrap();
+        let reser = serde_json::to_value(&block).unwrap();
+        assert_eq!(reser["type"], "thinking");
+        assert_eq!(reser["thinking"], "deep");
+        assert_eq!(reser["extra"], 42);
+    }
+
+    #[test]
+    fn test_other_block_not_sent_to_provider() {
+        // Provenance rule: `Other` blocks are dropped from the provider wire.
+        let msg = ConversationMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text(TextBlock::new("visible")),
+                ContentBlock::Other(serde_json::json!({"type":"thinking","thinking":"hidden"})),
+            ],
+        };
+        let param = msg.to_api_param();
+        let content = param["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "Other block must be dropped from the wire");
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn test_provider_content_block_drops_other() {
+        let other = ContentBlock::Other(serde_json::json!({"type":"image"}));
+        assert!(provider_content_block(&other).is_none());
+        let text = ContentBlock::Text(TextBlock::new("x"));
+        assert!(provider_content_block(&text).is_some());
     }
 }

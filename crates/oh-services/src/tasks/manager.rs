@@ -21,7 +21,13 @@ pub type InProcessJob = Pin<Box<dyn Future<Output = Result<String, String>> + Se
 
 // ── Completion listener type ────────────────────────────────────────────────
 
-pub type CompletionListener = Box<dyn Fn(&TaskRecord) + Send + Sync>;
+/// A completion listener.
+///
+/// `Arc` (not `Box`) so [`notify_listeners`] can clone the handles out of the
+/// `Inner` map, drop the lock, and *then* invoke them (ENG-5). Invoking arbitrary
+/// closures while holding the non-reentrant `tokio::Mutex` risks a deadlock if a
+/// listener re-enters the manager.
+pub type CompletionListener = Arc<dyn Fn(&TaskRecord) + Send + Sync>;
 
 // ── Per-task live state ──────────────────────────────────────────────────────
 
@@ -333,12 +339,13 @@ impl BackgroundTaskManager {
             }
         };
 
-        // Signal the watcher to kill the child.
+        // Signal the watcher to kill the child. The watcher's kill arm performs
+        // the single gauge decrement (ENG-5); stop_task must NOT decrement, or a
+        // stop racing a natural exit would double-count (gauge could go negative).
         if let Some(tx) = kill_tx {
             let _ = tx.send(());
         }
 
-        oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
         let guard = self.inner.lock().await;
         guard.tasks.get(id).map(|lt| lt.record.clone())
     }
@@ -364,7 +371,15 @@ impl BackgroundTaskManager {
 
         let content = String::from_utf8_lossy(&bytes).into_owned();
         if content.len() > max_bytes {
-            Ok(content[content.len() - max_bytes..].to_string())
+            // ENG-4: `content.len() - max_bytes` is a byte offset that may land
+            // in the middle of a multi-byte UTF-8 sequence; slicing there panics.
+            // Snap the start forward to the next char boundary before slicing so
+            // we return valid UTF-8 (yielding at most `max_bytes` bytes).
+            let mut start = content.len() - max_bytes;
+            while start < content.len() && !content.is_char_boundary(start) {
+                start += 1;
+            }
+            Ok(content[start..].to_string())
         } else {
             Ok(content)
         }
@@ -445,8 +460,12 @@ fn spawn_and_watch(
                         .metadata
                         .insert("spawn_error".into(), e.to_string());
                 }
+                // ENG-5: the watcher owns the gauge decrement (exactly once per
+                // task on its terminal transition); stop_task no longer decrements.
                 oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
-                notify_listeners(&mut guard, &task_id);
+                let snapshot = snapshot_listeners(&guard, &task_id);
+                drop(guard);
+                fire_listeners(snapshot);
                 return;
             }
         };
@@ -471,8 +490,11 @@ fn spawn_and_watch(
                     lt.record.ended_at = Some(now());
                     lt.record.return_code = Some(-1);
                 }
+                // ENG-5: single-owner decrement (see spawn-error path above).
                 oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
-                notify_listeners(&mut guard, &task_id);
+                let snapshot = snapshot_listeners(&guard, &task_id);
+                drop(guard);
+                fire_listeners(snapshot);
                 return;
             }
         };
@@ -534,6 +556,9 @@ fn spawn_and_watch(
                 if let Some(h) = stderr_handle { let _ = h.await; }
 
                 let mut guard = inner.lock().await;
+                // ENG-5: the watcher is the single owner of the gauge decrement,
+                // on its terminal-state transition. stop_task no longer
+                // decrements, so a stop racing a natural exit can't double-count.
                 oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
                 if let Some(lt) = guard.tasks.get_mut(&task_id) {
                     // If stop_task already marked this Killed, preserve that.
@@ -549,7 +574,10 @@ fn spawn_and_watch(
                         lt.record.ended_at = Some(now());
                     }
                 }
-                notify_listeners(&mut guard, &task_id);
+                // ENG-5: snapshot under the lock, drop it, then fire listeners.
+                let snapshot = snapshot_listeners(&guard, &task_id);
+                drop(guard);
+                fire_listeners(snapshot);
             }
             _ = kill_rx => {
                 // Kill signal received from stop_task().
@@ -570,9 +598,14 @@ fn spawn_and_watch(
                 if let Some(h) = stdout_handle { let _ = h.await; }
                 if let Some(h) = stderr_handle { let _ = h.await; }
 
-                // Status was already set to Killed in stop_task(); fire listeners.
-                let mut guard = inner.lock().await;
-                notify_listeners(&mut guard, &task_id);
+                // Status was already set to Killed in stop_task(); the watcher
+                // still owns the single gauge decrement (ENG-5) since stop_task
+                // no longer decrements.
+                let guard = inner.lock().await;
+                oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
+                let snapshot = snapshot_listeners(&guard, &task_id);
+                drop(guard);
+                fire_listeners(snapshot);
             }
         }
     })
@@ -612,6 +645,7 @@ fn spawn_in_process(
         }
 
         let mut guard = inner.lock().await;
+        // ENG-5: single-owner gauge decrement on terminal transition.
         oh_telemetry::ACTIVE_BACKGROUND_TASKS.add(-1, &[]);
         if let Some(lt) = guard.tasks.get_mut(&task_id) {
             // Preserve a Killed status set by stop_task.
@@ -633,19 +667,36 @@ fn spawn_in_process(
                 lt.record.ended_at = Some(now());
             }
         }
-        notify_listeners(&mut guard, &task_id);
+        // ENG-5: snapshot under the lock, drop it, then fire listeners.
+        let snapshot = snapshot_listeners(&guard, &task_id);
+        drop(guard);
+        fire_listeners(snapshot);
     })
 }
 
-/// Fire all registered completion listeners for `task_id`.
-/// Must be called while holding the `Inner` lock.
-fn notify_listeners(guard: &mut Inner, task_id: &str) {
-    let record = match guard.tasks.get(task_id) {
-        Some(lt) => lt.record.clone(),
-        None => return,
-    };
-    for listener in guard.completion_listeners.values() {
-        listener(&record);
+/// Snapshot the data needed to fire completion listeners for `task_id`: a clone
+/// of the task record and `Arc` handles to every registered listener.
+///
+/// ENG-5: this is the lock-held half. The caller takes this snapshot, *drops the
+/// `Inner` guard*, then calls [`fire_listeners`]. Invoking the closures outside
+/// the lock removes the reentrancy-deadlock hazard (a listener that calls back
+/// into the manager would otherwise deadlock the non-reentrant `tokio::Mutex`).
+fn snapshot_listeners(
+    guard: &Inner,
+    task_id: &str,
+) -> Option<(TaskRecord, Vec<CompletionListener>)> {
+    let record = guard.tasks.get(task_id)?.record.clone();
+    let listeners = guard.completion_listeners.values().cloned().collect();
+    Some((record, listeners))
+}
+
+/// Fire the snapshotted listeners. MUST be called after the `Inner` guard has
+/// been dropped (see [`snapshot_listeners`]).
+fn fire_listeners(snapshot: Option<(TaskRecord, Vec<CompletionListener>)>) {
+    if let Some((record, listeners)) = snapshot {
+        for listener in listeners {
+            listener(&record);
+        }
     }
 }
 
@@ -751,7 +802,7 @@ mod tests {
         let mgr = BackgroundTaskManager::new();
 
         let _unregister = mgr
-            .register_completion_listener(Box::new(move |rec| {
+            .register_completion_listener(Arc::new(move |rec: &TaskRecord| {
                 if rec.status == TaskStatus::Completed {
                     fired2.store(true, Ordering::SeqCst);
                 }
@@ -807,6 +858,109 @@ mod tests {
         }
         let output = mgr.read_output(&task_id, 65536).await.unwrap();
         assert!(output.contains("via-trait"), "output: {output:?}");
+    }
+
+    /// ENG-4: `read_output` must not panic when the byte cut for `max_bytes`
+    /// lands in the middle of a multi-byte UTF-8 sequence.
+    #[tokio::test]
+    async fn test_read_output_snaps_to_char_boundary() {
+        let mgr = BackgroundTaskManager::new();
+        // Write a log file full of multi-byte characters (each 'é' is 2 bytes,
+        // each '🦀' is 4 bytes), then read back a byte budget that is guaranteed
+        // to slice mid-character if not boundary-snapped.
+        let id = Uuid::new_v4().to_string();
+        let dir = std::env::temp_dir().join(format!("oh_eng4_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output_file = dir.join(format!("{id}.log"));
+        let content = "é🦀".repeat(100); // mixed 2- and 4-byte chars
+        std::fs::write(&output_file, content.as_bytes()).unwrap();
+
+        // Insert a live task pointing at this file.
+        {
+            let mut guard = mgr.inner.lock().await;
+            guard.tasks.insert(
+                id.clone(),
+                LiveTask {
+                    record: TaskRecord {
+                        id: id.clone(),
+                        task_type: TaskType::LocalBash,
+                        status: TaskStatus::Completed,
+                        description: "eng4".into(),
+                        cwd: "/tmp".into(),
+                        output_file: output_file.clone(),
+                        command: None,
+                        prompt: None,
+                        created_at: now(),
+                        started_at: Some(now()),
+                        ended_at: Some(now()),
+                        return_code: Some(0),
+                        metadata: HashMap::new(),
+                    },
+                    watcher: None,
+                    kill_tx: None,
+                },
+            );
+        }
+
+        // Try several odd byte budgets that would land mid-char without snapping.
+        for budget in [1usize, 3, 5, 7, 101, 303] {
+            let out = mgr
+                .read_output(&id, budget)
+                .await
+                .expect("read_output must not error");
+            assert!(out.len() <= budget, "returned more than the byte budget");
+            // The returned slice must be valid UTF-8 (it is, since it's a String)
+            // and a suffix of the original content.
+            assert!(content.ends_with(&out), "output should be a suffix");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ENG-5: a completion listener that re-enters the manager (calls back into
+    /// an async method needing the `Inner` lock) must not deadlock — listeners
+    /// are fired AFTER the lock is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_listener_can_reenter_manager_without_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mgr = Arc::new(BackgroundTaskManager::new());
+        let reentered = Arc::new(AtomicBool::new(false));
+
+        let mgr_for_listener = Arc::clone(&mgr);
+        let reentered2 = Arc::clone(&reentered);
+        let _unreg = mgr
+            .register_completion_listener(Arc::new(move |rec: &TaskRecord| {
+                // Re-enter the manager from within the listener. If listeners ran
+                // under the Inner lock this `block_in_place` + `list` would
+                // deadlock on the non-reentrant tokio Mutex.
+                let mgr3 = Arc::clone(&mgr_for_listener);
+                let id = rec.id.clone();
+                let reentered3 = Arc::clone(&reentered2);
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        // Touch a manager method that locks Inner.
+                        let _ = mgr3.get_task(&id).await;
+                        reentered3.store(true, Ordering::SeqCst);
+                    });
+                });
+            }))
+            .await;
+
+        let task = mgr.create_shell_task("echo reentry", "reentry test", "/tmp").await;
+        let task_id = task.id.clone();
+
+        for _ in 0..50 {
+            sleep(Duration::from_millis(100)).await;
+            let r = mgr.get_task(&task_id).await.unwrap();
+            if r.status != TaskStatus::Running && r.status != TaskStatus::Pending {
+                break;
+            }
+        }
+
+        assert!(
+            reentered.load(Ordering::SeqCst),
+            "listener did not run / re-enter the manager"
+        );
     }
 
     #[tokio::test]

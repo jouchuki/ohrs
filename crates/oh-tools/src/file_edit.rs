@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use oh_types::tools::{ToolExecutionContext, ToolResult};
-use std::path::Path;
 
 pub struct FileEditTool;
 
@@ -33,10 +32,18 @@ impl crate::traits::Tool for FileEditTool {
         false
     }
 
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: &ToolExecutionContext,
+        context: &ToolExecutionContext,
     ) -> ToolResult {
         let file_path = match arguments.get("file_path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -59,12 +66,20 @@ impl crate::traits::Tool for FileEditTool {
             return ToolResult::error("old_string and new_string are identical");
         }
 
-        let path = Path::new(file_path);
+        // TOOL-3 / TOOL-4: resolve real target and confine to allowed roots.
+        let path = match crate::pathsafe::resolve_and_confine(
+            &context.cwd,
+            file_path,
+            &context.allowed_roots,
+        ) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(e.to_string()),
+        };
         if !path.exists() {
             return ToolResult::error(format!("File not found: {}", file_path));
         }
 
-        let original = match std::fs::read_to_string(path) {
+        let original = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
@@ -79,7 +94,7 @@ impl crate::traits::Tool for FileEditTool {
             original.replacen(old_string, new_string, 1)
         };
 
-        match std::fs::write(path, updated.as_bytes()) {
+        match std::fs::write(&path, updated.as_bytes()) {
             Ok(()) => ToolResult::success(format!("Successfully edited {}", file_path)),
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }

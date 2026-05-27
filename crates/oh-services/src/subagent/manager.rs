@@ -184,15 +184,17 @@ impl SubagentManager {
             let target = record.id.clone();
             let unregister = self
                 .tasks
-                .register_completion_listener(Box::new(move |rec| {
-                    if rec.id == target {
-                        let repo = repo.clone();
-                        let dir = dir.clone();
-                        tokio::spawn(async move {
-                            oh_swarm::remove_worktree(&repo, &dir).await;
-                        });
-                    }
-                }))
+                .register_completion_listener(std::sync::Arc::new(
+                    move |rec: &oh_types::tasks::TaskRecord| {
+                        if rec.id == target {
+                            let repo = repo.clone();
+                            let dir = dir.clone();
+                            tokio::spawn(async move {
+                                oh_swarm::remove_worktree(&repo, &dir).await;
+                            });
+                        }
+                    },
+                ))
                 .await;
             // The listener self-fires on completion; drop the unregister handle
             // (it removes the closure on the next scheduler tick, which is fine

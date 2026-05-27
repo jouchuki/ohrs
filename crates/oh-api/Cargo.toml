@@ -21,3 +21,5 @@ pin-project-lite.workspace = true
 eventsource-stream = "0.2"
 base64 = "0.22"
 bytes = "1"
+# ENG-9: preserve tool-call arrival order (output_item.added) deterministically.
+indexmap = "2"

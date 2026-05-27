@@ -112,14 +112,22 @@ pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut hook_registry = HookRegistry::new();
     hook_registry.merge_from_map(&settings.hooks);
 
-    let hook_executor: Arc<dyn HookExecutorTrait> = Arc::new(HookExecutor::new(
+    let hook_executor_concrete = HookExecutor::new(
         hook_registry,
         HookExecutionContext {
             cwd: cwd.clone(),
             api_client: api_client.clone(),
             default_model: settings.model.clone(),
         },
-    ));
+    );
+    // HOOK-1 / C7: keep the live registry handle so HookManage mutations apply.
+    let hook_registry_handle = hook_executor_concrete.registry_handle();
+    let hook_executor: Arc<dyn HookExecutorTrait> = Arc::new(hook_executor_concrete);
+
+    // ENG-1: proactive compactor, gated on the configured threshold.
+    let compactor = settings
+        .auto_compact_threshold_tokens
+        .map(|threshold| Arc::new(oh_services::compact::Compactor::new(threshold, threshold / 8)));
 
     // --- system prompt ---
     let system_prompt: String = oh_services::prompts::PromptBuilder::new(&cwd)
@@ -152,6 +160,9 @@ pub async fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         session_id: None,
         subagents: None,
         tasks: None,
+        cancel: oh_engine::CancellationToken::new(),
+        hook_registry: Some(hook_registry_handle),
+        compactor,
     };
 
     let result = run_subagent(ctx, args.prompt).await?;

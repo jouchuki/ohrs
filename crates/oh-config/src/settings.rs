@@ -320,7 +320,14 @@ pub fn builtin_profiles() -> Vec<ProviderProfile> {
 /// Main settings model for OpenHarness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    #[serde(default)]
+    /// API key for the configured provider.
+    ///
+    /// This is **never persisted** to `settings.json`: it is skipped when
+    /// empty (the common case, since the key is normally resolved from the
+    /// environment via [`Settings::resolve_api_key`]) so a secret pulled from
+    /// the environment cannot leak into the on-disk config. A key explicitly
+    /// written into the config file by the user still round-trips.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     /// LLM provider: "anthropic" (default) or "openai".
     #[serde(default = "default_provider")]
@@ -604,17 +611,11 @@ pub fn apply_env_overrides(settings: Settings) -> Settings {
         }
     }
 
-    // Pick the right API key env var based on provider
-    let api_key_var = if s.is_openai() {
-        "OPENAI_API_KEY"
-    } else {
-        "ANTHROPIC_API_KEY"
-    };
-    if let Ok(api_key) = std::env::var(api_key_var) {
-        if !api_key.is_empty() {
-            s.api_key = api_key;
-        }
-    }
+    // NOTE: the API key is deliberately NOT copied from the environment into
+    // `s.api_key` here. Doing so used to leak the secret into the persisted
+    // `settings.json` (see CONFIG-1). Environment resolution lives solely in
+    // `Settings::resolve_api_key`, which already prefers an explicit instance
+    // value over the env var, so the persisted field stays clean.
 
     // Permission mode override
     if let Some(mode_str) = env_with_fallback(
@@ -1015,7 +1016,9 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_env_overrides_api_key() {
+    fn test_apply_env_overrides_does_not_copy_api_key_into_persisted_field() {
+        // CONFIG-1: an env-supplied API key must NOT land in the persisted
+        // `api_key` field; it is resolved on demand in `resolve_api_key`.
         let _env_guard = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1028,8 +1031,37 @@ mod tests {
             std::env::set_var("ANTHROPIC_API_KEY", "sk-env-override");
         }
         let s = apply_env_overrides(Settings::default());
+        // But resolution still picks it up.
+        let resolved = s.resolve_api_key();
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
-        assert_eq!(s.api_key, "sk-env-override");
+        assert_eq!(s.api_key, "", "env key must not be copied into the field");
+        assert_eq!(resolved.unwrap(), "sk-env-override");
+    }
+
+    #[test]
+    fn test_empty_api_key_is_not_serialized() {
+        // CONFIG-1: an empty api_key must be skipped so the secret never
+        // appears in a persisted settings.json.
+        let s = Settings::default();
+        assert_eq!(s.api_key, "");
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("api_key"),
+            "empty api_key must not be serialized, got: {json}"
+        );
+    }
+
+    #[test]
+    fn test_nonempty_api_key_still_serialized() {
+        // An explicitly-set key (e.g. user wrote it into the config) round-trips.
+        let s = Settings {
+            api_key: "sk-explicit".into(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("sk-explicit"));
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.api_key, "sk-explicit");
     }
 
     #[test]

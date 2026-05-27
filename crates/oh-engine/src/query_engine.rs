@@ -4,12 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use oh_api::StreamingApiClient;
+use oh_hooks::loader::HookRegistry;
 use oh_hooks::{HookEvent, HookExecutorTrait};
 use oh_permissions::PermissionChecker;
+use oh_services::compact::Compactor;
 use oh_tools::ToolRegistry;
 use oh_types::api::UsageSnapshot;
 use oh_types::messages::ConversationMessage;
 use oh_types::stream_events::StreamEvent;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::cost_tracker::CostTracker;
 use crate::query::{run_query, AskUserPromptFn, PermissionPromptFn, QueryContext};
@@ -36,6 +40,15 @@ pub struct QueryEngine {
     /// `QueryContext` so lifecycle hooks (and the trajectory recorder fanned
     /// into the hook executor) record under the main session.
     session_id: Option<String>,
+    /// Cancellation token (ENG-2 / C6). Cloned into each `QueryContext`; firing
+    /// it aborts the in-flight turn.
+    cancel: CancellationToken,
+    /// Live hook registry handle (HOOK-1 / C7) so `HookManage` mutations take
+    /// effect at runtime. Set via [`set_hook_registry`](Self::set_hook_registry).
+    hook_registry: Option<Arc<RwLock<HookRegistry>>>,
+    /// Proactive context compactor (ENG-1). Set via
+    /// [`set_compactor`](Self::set_compactor).
+    compactor: Option<Arc<Compactor>>,
 }
 
 impl QueryEngine {
@@ -67,12 +80,39 @@ impl QueryEngine {
             subagents: None,
             tasks: None,
             session_id: None,
+            cancel: CancellationToken::new(),
+            hook_registry: None,
+            compactor: None,
         }
     }
 
     /// Set the persistent session id this main run records into.
     pub fn set_session_id(&mut self, session_id: impl Into<String>) {
         self.session_id = Some(session_id.into());
+    }
+
+    /// Return a handle to this engine's cancellation token (ENG-2 / C6). A caller
+    /// (Ctrl-C handler, UI stop button) clones it and calls `.cancel()` to abort
+    /// the in-flight turn.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Replace the cancellation token (e.g. to share one across components).
+    pub fn set_cancellation_token(&mut self, token: CancellationToken) {
+        self.cancel = token;
+    }
+
+    /// Thread the live hook registry so the `HookManage` tool can mutate hooks at
+    /// runtime (HOOK-1 / C7). Typically the handle returned by
+    /// `HookExecutor::registry_handle()`.
+    pub fn set_hook_registry(&mut self, registry: Arc<RwLock<HookRegistry>>) {
+        self.hook_registry = Some(registry);
+    }
+
+    /// Enable proactive context compaction (ENG-1) with the given compactor.
+    pub fn set_compactor(&mut self, compactor: Arc<Compactor>) {
+        self.compactor = Some(compactor);
     }
 
     /// Inject the subagent-spawning handle so the `Agent` tool can reach the
@@ -210,6 +250,9 @@ impl QueryEngine {
             session_id: self.session_id.clone(),
             subagents: self.subagents.clone(),
             tasks: self.tasks.clone(),
+            cancel: self.cancel.clone(),
+            hook_registry: self.hook_registry.clone(),
+            compactor: self.compactor.clone(),
         };
 
         let events = run_query(&context, &mut self.messages).await?;
@@ -365,7 +408,7 @@ mod tests {
         engine.submit_message("Ask").await.unwrap();
 
         // FakeApiClient returns 10 input + 5 output per call
-        assert_eq!(engine.total_usage().total_input_tokens, 10);
+        assert_eq!(engine.total_usage().total_input_tokens(), 10);
         assert_eq!(engine.total_usage().total_output_tokens, 5);
         assert_eq!(engine.total_usage().total_tokens(), 15);
         assert_eq!(engine.total_usage().turns, 1);
@@ -384,8 +427,9 @@ mod tests {
         engine.submit_message("Second question").await.unwrap();
         assert_eq!(engine.messages().len(), 4);
 
-        // Cost accumulates across turns
-        assert_eq!(engine.total_usage().total_input_tokens, 20);
+        // ENG-7: input is the last turn's context size (10), not a running sum;
+        // output accumulates across turns (5 + 5 = 10).
+        assert_eq!(engine.total_usage().total_input_tokens(), 10);
         assert_eq!(engine.total_usage().total_output_tokens, 10);
         assert_eq!(engine.total_usage().turns, 2);
     }

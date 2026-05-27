@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use oh_types::tools::{ToolExecutionContext, ToolResult};
-use std::path::Path;
 
 pub struct FileWriteTool;
 
@@ -31,10 +30,18 @@ impl crate::traits::Tool for FileWriteTool {
         false
     }
 
+    fn path_args(&self, input: &serde_json::Value) -> Vec<String> {
+        input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
+    }
+
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: &ToolExecutionContext,
+        context: &ToolExecutionContext,
     ) -> ToolResult {
         let file_path = match arguments.get("file_path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -45,7 +52,16 @@ impl crate::traits::Tool for FileWriteTool {
             None => return ToolResult::error("Missing required parameter: content"),
         };
 
-        let path = Path::new(file_path);
+        // TOOL-3 / TOOL-4: resolve the real target (incl. not-yet-existing
+        // files) and confine to allowed roots before creating any directories.
+        let path = match crate::pathsafe::resolve_and_confine(
+            &context.cwd,
+            file_path,
+            &context.allowed_roots,
+        ) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(e.to_string()),
+        };
 
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {

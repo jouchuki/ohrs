@@ -56,6 +56,10 @@ oh
 # With trajectory recording
 oh -p "analyze this repo" --trajectory trace.jsonl
 
+# Machine-readable result: prints exactly one JSON object to stdout
+#   {"v":1,"result":"...","model":"...","status":"ok","error":null,"usage":{...}}
+oh -p "analyze this repo" --output-format json
+
 # Full auto (no permission prompts)
 oh -p "fix the tests" --permission-mode full_auto
 ```
@@ -93,17 +97,34 @@ Capture the complete agent action trace with `--trajectory`:
 oh -p "investigate this bug" --trajectory trace.jsonl
 ```
 
-Every event is recorded — streaming text fragments, full assistant responses with reasoning, tool dispatch with inputs, tool outputs, token usage, and wall-clock timing:
+The trajectory is a **versioned, incremental JSONL stream** (schema version `1`).
+One JSON object is written per line and flushed immediately, so the file stays
+parseable even if the run crashes, is killed (`SIGTERM`/`SIGINT`), or hits the
+turn ceiling — the final `end` line is always written. Every line carries
+`"v": 1`; the `kind` field discriminates the record type:
 
 ```jsonl
-{"seq":0,"turn":0,"action":"text_delta","text":"Let me ","_t_ms":1200}
-{"seq":1,"turn":0,"action":"text_delta","text":"look at the logs...","_t_ms":1250}
-{"seq":2,"turn":1,"action":"assistant_response","reasoning":"Let me look at the logs...","tool_calls":[{"id":"call_1","name":"bash","input":{"command":"cat /var/log/app.log"}}],"content_blocks":[...],"usage":{"input_tokens":150,"output_tokens":42},"_t_ms":1400}
-{"seq":3,"turn":1,"action":"tool_start","tool":"bash","input":{"command":"cat /var/log/app.log"},"_t_ms":1401}
-{"seq":4,"turn":1,"action":"tool_result","tool":"bash","output":"ERROR: connection refused...","is_error":false,"_t_ms":1450}
-{"seq":5,"turn":2,"action":"assistant_response","reasoning":"The log shows a connection refused error...","tool_calls":[],...,"_t_ms":2100}
-{"seq":6,"action":"trajectory_end","total_turns":2,"total_events":6,"elapsed_ms":2100}
+{"v":1,"kind":"meta","ts":"2026-05-27T09:14:02Z","model":"claude-sonnet-4-6","session_id":"session-abc123"}
+{"v":1,"kind":"assistant","turn":1,"seq":1,"text":"Let me look at the logs...","tool_calls":[{"id":"toolu_1","name":"bash","arguments":{"command":"cat /var/log/app.log"}}]}
+{"v":1,"kind":"usage","turn":1,"input_tokens":150,"output_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+{"v":1,"kind":"tool_result","turn":1,"seq":2,"tool_use_id":"toolu_1","name":"bash","content":"ERROR: connection refused...","is_error":false}
+{"v":1,"kind":"assistant","turn":2,"seq":3,"text":"The log shows a connection refused error...","tool_calls":[]}
+{"v":1,"kind":"usage","turn":2,"input_tokens":210,"output_tokens":58,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+{"v":1,"kind":"end","turn":2,"status":"ok","error":null}
 ```
+
+Record kinds:
+
+- **`meta`** (first line): `ts` (RFC3339), `model`, `session_id`.
+- **`assistant`**: a completed assistant turn — `text` plus its `tool_calls`
+  (each `{id, name, arguments}`; may be `[]`).
+- **`tool_result`**: one executed tool — `tool_use_id`, `name`, `content`, `is_error`.
+- **`usage`**: per-turn token counts (incl. cache read/creation).
+- **`end`** (last line): terminal `status` (`"ok"` | `"error"` | `"max_turns"`)
+  and `error` (`null` unless failed). Written even on crash/signal via a `Drop`
+  guard and a `SIGTERM` handler.
+
+`seq` is a monotonically increasing integer across the whole file.
 
 This is different from OTel telemetry (which captures operational metrics like latency histograms and token counters). Trajectories capture **what the agent did and why** — useful for debugging reasoning, reproducing runs, building eval datasets, and audit trails.
 

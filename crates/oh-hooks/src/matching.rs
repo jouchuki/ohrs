@@ -26,7 +26,16 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Inject `$ARGUMENTS` placeholder in a template string.
+/// Inject the `$ARGUMENTS` placeholder in a template string with the payload.
+///
+/// This is for **prompt/agent hooks only**, where the result becomes the text of
+/// an LLM message — there is no shell involved, so interpolation is safe.
+///
+/// SECURITY (HOOK-3): command hooks must NOT use this. Interpolating the
+/// (model-influenced) payload into a string handed to `/bin/bash -c` is a shell
+/// injection vector. Command hooks receive the payload via the
+/// `OPENHARNESS_HOOK_PAYLOAD` env var and stdin instead — see
+/// [`crate::executor::HookExecutor`].
 pub fn inject_arguments(template: &str, payload: &serde_json::Value) -> String {
     template.replace("$ARGUMENTS", &payload.to_string())
 }

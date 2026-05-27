@@ -36,7 +36,12 @@ pub fn load_native_plugin(
         return Err(NativePluginError::NullVTable);
     }
 
-    // Check ABI version
+    // --- ABI capability/version handshake (TOOL-6) ---
+    // Performed BEFORE invoking any other vtable function pointer, so an
+    // incompatibly-built plugin is rejected without ever being called into.
+    //
+    // SAFETY: `vtable` is non-null and points to a `PluginVTable` returned by the
+    // plugin's entry point. We only read the leading POD fields here.
     let abi_major = unsafe { (*vtable).abi_version_major };
     if abi_major != ABI_VERSION_MAJOR {
         return Err(NativePluginError::AbiMismatch {
@@ -45,10 +50,37 @@ pub fn load_native_plugin(
         });
     }
 
-    // Get manifest
+    let capabilities = unsafe { (*vtable).capabilities };
+    if capabilities & OH_REQUIRED_CAPABILITIES != OH_REQUIRED_CAPABILITIES {
+        let missing = OH_REQUIRED_CAPABILITIES & !capabilities;
+        tracing::warn!(
+            plugin_path = %dylib_path.display(),
+            required = OH_REQUIRED_CAPABILITIES,
+            advertised = capabilities,
+            missing,
+            "rejecting plugin: missing required ABI capabilities (e.g. panic=unwind)"
+        );
+        return Err(NativePluginError::MissingCapabilities {
+            required: OH_REQUIRED_CAPABILITIES,
+            got: capabilities,
+        });
+    }
+
+    // Get manifest. Validate UTF-8 (TOOL-5) and free the plugin allocation
+    // through the plugin's own free fn afterwards (TOOL-5/TOOL-6).
     let manifest_json = unsafe { ((*vtable).get_manifest_json)() };
-    let manifest_str = unsafe { manifest_json.as_str() };
-    let manifest: PluginManifest = serde_json::from_str(manifest_str)
+    let manifest_str = match unsafe { manifest_json.as_str() } {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            unsafe { ((*vtable).free_string)(manifest_json) };
+            return Err(NativePluginError::InvalidUtf8 {
+                field: "manifest_json",
+                source: e,
+            });
+        }
+    };
+    unsafe { ((*vtable).free_string)(manifest_json) };
+    let manifest: PluginManifest = serde_json::from_str(&manifest_str)
         .map_err(|e| NativePluginError::ManifestParse(e.to_string()))?;
 
     let enabled = enabled_plugins
@@ -63,49 +95,66 @@ pub fn load_native_plugin(
         return Err(NativePluginError::InitFailed(init_result));
     }
 
-    // Get skills
+    // Get skills. Copy each field out (validating UTF-8 lossily — a bad string
+    // degrades that one field, it must never crash the host), then hand the whole
+    // slice back to the plugin to free with its own allocator (TOOL-5).
     let skills_slice = unsafe { ((*vtable).get_skills)() };
     let skills = if skills_slice.ptr.is_null() || skills_slice.len == 0 {
         Vec::new()
     } else {
-        let mut skills = Vec::new();
+        let mut skills = Vec::with_capacity(skills_slice.len);
         for i in 0..skills_slice.len {
+            // SAFETY: handshake passed; the plugin returned `len` valid elements.
             let skill = unsafe { &*skills_slice.ptr.add(i) };
+            let name = unsafe { skill.name.as_str_lossy() }.into_owned();
+            let description = unsafe { skill.description.as_str_lossy() }.into_owned();
+            let content = unsafe { skill.content.as_str_lossy() }.into_owned();
             skills.push(SkillDefinition {
-                name: unsafe { skill.name.as_str() }.to_string(),
-                description: unsafe { skill.description.as_str() }.to_string(),
-                content: unsafe { skill.content.as_str() }.to_string(),
+                name,
+                description,
+                content,
                 source: "native_plugin".into(),
                 path: Some(path.display().to_string()),
             });
         }
         skills
     };
+    // Free the skills slice (backing array + nested strings) via the plugin.
+    unsafe { ((*vtable).free_skills)(skills_slice) };
 
-    // Get hooks
+    // Get hooks. Same copy-then-free discipline.
     let hooks_slice = unsafe { ((*vtable).get_hooks)() };
     let hooks = if hooks_slice.ptr.is_null() || hooks_slice.len == 0 {
         HashMap::new()
     } else {
         let mut hooks: HashMap<String, Vec<oh_types::hooks::HookDefinition>> = HashMap::new();
         for i in 0..hooks_slice.len {
+            // SAFETY: handshake passed; the plugin returned `len` valid elements.
             let hook_def = unsafe { &*hooks_slice.ptr.add(i) };
-            let event = unsafe { hook_def.event.as_str() }.to_string();
-            let hook_json = unsafe { hook_def.hook_json.as_str() };
-            if let Ok(hook) = serde_json::from_str(hook_json) {
-                hooks.entry(event).or_default().push(hook);
+            let event = unsafe { hook_def.event.as_str_lossy() }.into_owned();
+            let hook_json = unsafe { hook_def.hook_json.as_str_lossy() };
+            match serde_json::from_str(&hook_json) {
+                Ok(hook) => hooks.entry(event).or_default().push(hook),
+                Err(e) => tracing::warn!(
+                    plugin = %manifest.name,
+                    event = %event,
+                    error = %e,
+                    "skipping malformed hook definition from native plugin"
+                ),
             }
         }
         hooks
     };
+    unsafe { ((*vtable).free_hooks)(hooks_slice) };
 
-    // Get MCP configs
+    // Get MCP configs. Validate UTF-8 lossily, then free via the plugin.
     let mcp_json = unsafe { ((*vtable).get_mcp_configs_json)() };
-    let mcp_str = unsafe { mcp_json.as_str() };
+    let mcp_str = unsafe { mcp_json.as_str_lossy() }.into_owned();
+    unsafe { ((*vtable).free_string)(mcp_json) };
     let mcp_servers = if mcp_str.is_empty() || mcp_str == "null" {
         HashMap::new()
     } else {
-        serde_json::from_str::<oh_types::mcp::McpJsonConfig>(mcp_str)
+        serde_json::from_str::<oh_types::mcp::McpJsonConfig>(&mcp_str)
             .map(|c| c.mcp_servers)
             .unwrap_or_default()
     };
@@ -158,6 +207,13 @@ pub enum NativePluginError {
     NullVTable,
     #[error("ABI version mismatch: expected {expected}, got {got}")]
     AbiMismatch { expected: u32, got: u32 },
+    #[error("plugin missing required ABI capabilities: required {required:#x}, got {got:#x}")]
+    MissingCapabilities { required: u64, got: u64 },
+    #[error("plugin returned invalid UTF-8 in field '{field}': {source}")]
+    InvalidUtf8 {
+        field: &'static str,
+        source: std::str::Utf8Error,
+    },
     #[error("manifest parse error: {0}")]
     ManifestParse(String),
     #[error("plugin init failed with code: {0}")]

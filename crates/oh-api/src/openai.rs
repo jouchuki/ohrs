@@ -7,13 +7,16 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use oh_types::api::*;
-use oh_types::messages::{ContentBlock, ConversationMessage, Role, TextBlock, ToolUseBlock};
+use oh_types::messages::{ContentBlock, ConversationMessage, Role};
+#[cfg(test)]
+use oh_types::messages::{TextBlock, ToolUseBlock};
 use opentelemetry::KeyValue;
 use tracing::{info_span, warn, Instrument};
 
 use crate::client::StreamingApiClient;
+use crate::sse::stream_openai_chat;
 
 /// OpenAI Chat Completions API client.
 pub struct OpenAiApiClient {
@@ -34,11 +37,15 @@ impl OpenAiApiClient {
         }
     }
 
-    /// Single attempt at calling the Chat Completions endpoint.
+    /// Single attempt at calling the streaming Chat Completions endpoint.
+    ///
+    /// Returns the ordered incremental events (`TextDelta` / `ToolUseDelta`
+    /// followed by exactly one `MessageComplete`) by driving the response
+    /// `bytes_stream()` through the shared OpenAI SSE decoder (ENG-3).
     async fn complete_once(
         &self,
         request: &ApiMessageRequest,
-    ) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError> {
+    ) -> Result<Vec<Result<ApiStreamEvent, ApiError>>, ApiError> {
         let span = info_span!("openai_api_request", model = %request.model);
 
         async {
@@ -64,6 +71,9 @@ impl OpenAiApiClient {
                 "model": request.model,
                 "max_completion_tokens": request.max_tokens,
                 "messages": oai_messages,
+                "stream": true,
+                // Ask the server to emit a terminal usage chunk in streaming mode.
+                "stream_options": { "include_usage": true },
             });
 
             // Convert tools from Anthropic format to OpenAI function-calling format
@@ -78,6 +88,7 @@ impl OpenAiApiClient {
                 .post(format!("{}/v1/chat/completions", self.base_url))
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
                 .json(&body)
                 .send()
                 .await
@@ -85,26 +96,21 @@ impl OpenAiApiClient {
 
             let status = response.status().as_u16();
             if !response.status().is_success() {
-                let text = response.text().await.unwrap_or_default();
-                if status == 401 || status == 403 {
-                    return Err(ApiError::Authentication(text));
-                }
-                if status == 429 {
-                    return Err(ApiError::RateLimit(text));
-                }
-                return Err(ApiError::Request(format!("status {status}: {text}")));
+                let resp_body = response.text().await.unwrap_or_default();
+                return Err(map_http_error(status, resp_body));
             }
 
-            let resp_text = response
-                .text()
-                .await
-                .map_err(|e| ApiError::Network(e.to_string()))?;
+            let byte_stream = response.bytes_stream();
+            let events: Vec<Result<ApiStreamEvent, ApiError>> =
+                stream_openai_chat(byte_stream).collect().await;
 
-            let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
-                .map_err(|e| ApiError::Request(format!("invalid JSON: {e}")))?;
+            // Surface a transport-level SSE error (if any) so the retry loop
+            // can act on it rather than yielding a half-built message.
+            if let Some(Err(e)) = events.iter().find(|e| e.is_err()) {
+                return Err(clone_api_error(e));
+            }
 
-            let (message, usage, stop_reason) = parse_openai_response(&resp_json)?;
-
+            // Record telemetry from the terminal MessageComplete usage.
             let elapsed = start.elapsed().as_secs_f64();
             oh_telemetry::API_REQUEST_DURATION.record(
                 elapsed,
@@ -113,25 +119,59 @@ impl OpenAiApiClient {
                     KeyValue::new("status", "ok"),
                 ],
             );
-            oh_telemetry::TOKEN_USAGE_TOTAL.add(
-                usage.input_tokens,
-                &[
-                    KeyValue::new("model", request.model.clone()),
-                    KeyValue::new("direction", "input"),
-                ],
-            );
-            oh_telemetry::TOKEN_USAGE_TOTAL.add(
-                usage.output_tokens,
-                &[
-                    KeyValue::new("model", request.model.clone()),
-                    KeyValue::new("direction", "output"),
-                ],
-            );
+            if let Some(Ok(ApiStreamEvent::MessageComplete(complete))) = events
+                .iter()
+                .rev()
+                .find(|e| matches!(e, Ok(ApiStreamEvent::MessageComplete(_))))
+            {
+                oh_telemetry::TOKEN_USAGE_TOTAL.add(
+                    complete.usage.input_tokens,
+                    &[
+                        KeyValue::new("model", request.model.clone()),
+                        KeyValue::new("direction", "input"),
+                    ],
+                );
+                oh_telemetry::TOKEN_USAGE_TOTAL.add(
+                    complete.usage.output_tokens,
+                    &[
+                        KeyValue::new("model", request.model.clone()),
+                        KeyValue::new("direction", "output"),
+                    ],
+                );
+            }
 
-            Ok((message, usage, stop_reason))
+            Ok(events)
         }
         .instrument(span)
         .await
+    }
+}
+
+/// Map a non-success HTTP response to the appropriate [`ApiError`] (ENG-6).
+///
+/// 401/403 → `Authentication`, 429 → `RateLimit`; everything else becomes a
+/// structured [`ApiError::Http`] carrying the numeric status so retryability is
+/// decided on the integer, not on substring-matching the body.
+fn map_http_error(status: u16, body: String) -> ApiError {
+    match status {
+        HTTP_UNAUTHORIZED | HTTP_FORBIDDEN => ApiError::Authentication(body),
+        HTTP_TOO_MANY_REQUESTS => ApiError::RateLimit(body),
+        _ => ApiError::Http { status, body },
+    }
+}
+
+/// `ApiError` is not `Clone` (it wraps non-clonable sources); reconstruct an
+/// equivalent error so a streamed transport error can flow into the retry loop.
+fn clone_api_error(err: &ApiError) -> ApiError {
+    match err {
+        ApiError::Network(m) => ApiError::Network(m.clone()),
+        ApiError::RateLimit(m) => ApiError::RateLimit(m.clone()),
+        ApiError::Authentication(m) => ApiError::Authentication(m.clone()),
+        ApiError::Request(m) => ApiError::Request(m.clone()),
+        ApiError::Http { status, body } => ApiError::Http {
+            status: *status,
+            body: body.clone(),
+        },
     }
 }
 
@@ -146,14 +186,9 @@ impl StreamingApiClient for OpenAiApiClient {
 
         for attempt in 0..=MAX_RETRIES {
             match self.complete_once(&request).await {
-                Ok((message, usage, stop_reason)) => {
-                    let events = vec![Ok(ApiStreamEvent::MessageComplete(
-                        ApiMessageCompleteEvent {
-                            message,
-                            usage,
-                            stop_reason,
-                        },
-                    ))];
+                Ok(events) => {
+                    // `events` already carries the incremental deltas followed
+                    // by the terminal MessageComplete, in arrival order.
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
                 Err(e) => {
@@ -289,7 +324,14 @@ fn convert_tool_to_openai(tool: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// Parse an OpenAI Chat Completions JSON response into internal types.
+/// Parse a *non-streaming* OpenAI Chat Completions JSON response into internal
+/// types.
+///
+/// The production path now streams via [`stream_openai_chat`] (ENG-3), so this
+/// buffered parser is retained only as a test oracle for the OpenAI →
+/// internal message-shape translation (the same translation the streaming
+/// decoder performs incrementally).
+#[cfg(test)]
 fn parse_openai_response(
     resp: &serde_json::Value,
 ) -> Result<(ConversationMessage, UsageSnapshot, Option<String>), ApiError> {
@@ -374,11 +416,14 @@ fn parse_openai_response(
     Ok((message, usage, stop_reason))
 }
 
+/// Decide retryability on the structured error; for [`ApiError::Http`] the
+/// decision is on the numeric status, never the body text (ENG-6).
 fn is_retryable(err: &ApiError) -> bool {
-    matches!(err, ApiError::RateLimit(_) | ApiError::Network(_))
-        || matches!(err, ApiError::Request(msg) if {
-            RETRYABLE_STATUS_CODES.iter().any(|code| msg.contains(&code.to_string()))
-        })
+    match err {
+        ApiError::RateLimit(_) | ApiError::Network(_) => true,
+        ApiError::Http { status, .. } => RETRYABLE_STATUS_CODES.contains(status),
+        ApiError::Authentication(_) | ApiError::Request(_) => false,
+    }
 }
 
 fn get_retry_delay(attempt: u32) -> f64 {
@@ -703,5 +748,74 @@ mod tests {
     #[test]
     fn test_is_retryable_authentication_false() {
         assert!(!is_retryable(&ApiError::Authentication("bad key".into())));
+    }
+
+    #[test]
+    fn test_is_retryable_http_retryable_status() {
+        assert!(is_retryable(&ApiError::Http {
+            status: 500,
+            body: "server error".into(),
+        }));
+    }
+
+    #[test]
+    fn test_is_retryable_http_non_retryable_status() {
+        assert!(!is_retryable(&ApiError::Http {
+            status: 404,
+            body: "not found".into(),
+        }));
+    }
+
+    /// Regression for ENG-6: a 400 whose body mentions a retryable code must
+    /// NOT be retried — the decision is on the integer status.
+    #[test]
+    fn test_is_retryable_http_400_body_mentions_503() {
+        assert!(!is_retryable(&ApiError::Http {
+            status: 400,
+            body: "the upstream said 503 but the request itself is a 400".into(),
+        }));
+    }
+
+    #[test]
+    fn test_map_http_error_maps_status() {
+        assert!(matches!(
+            map_http_error(401, "x".into()),
+            ApiError::Authentication(_)
+        ));
+        assert!(matches!(
+            map_http_error(429, "x".into()),
+            ApiError::RateLimit(_)
+        ));
+        match map_http_error(502, "bad gateway".into()) {
+            ApiError::Http { status, .. } => assert_eq!(status, 502),
+            other => panic!("expected Http, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_once_streams_via_sse_decoder() {
+        // Drive the shared decoder directly to confirm the streaming path
+        // assembles the same message the buffered parser used to produce.
+        use crate::sse::stream_openai_chat;
+        let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n")),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let events: Vec<_> = stream_openai_chat(stream).collect().await;
+        match events.last().unwrap() {
+            Ok(ApiStreamEvent::MessageComplete(c)) => {
+                assert_eq!(c.message.text(), "hi");
+                assert_eq!(c.usage.input_tokens, 3);
+                assert_eq!(c.usage.output_tokens, 1);
+                assert_eq!(c.stop_reason.as_deref(), Some("end_turn"));
+            }
+            other => panic!("expected MessageComplete, got {:?}", other),
+        }
     }
 }
