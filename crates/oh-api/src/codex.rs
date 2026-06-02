@@ -361,33 +361,73 @@ fn convert_tool(tool: &Value) -> Value {
     // nested form, unwrap it to Responses flat form.
     if tool.get("type").and_then(|v| v.as_str()) == Some("function") {
         if let Some(func) = tool.get("function") {
+            let mut parameters = func
+                .get("parameters")
+                .cloned()
+                .unwrap_or(json!({"type": "object", "properties": {}}));
+            sanitize_schema_for_responses(&mut parameters);
             return json!({
                 "type": "function",
                 "name": func.get("name").cloned().unwrap_or(json!("")),
                 "description": func.get("description").cloned().unwrap_or(json!("")),
-                "parameters": func
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or(json!({"type": "object", "properties": {}})),
+                "parameters": parameters,
             });
         }
-        // Already flat — pass through.
-        return tool.clone();
+        // Already flat — sanitize its parameter schema in place and pass through.
+        let mut flat = tool.clone();
+        if let Some(parameters) = flat.get_mut("parameters") {
+            sanitize_schema_for_responses(parameters);
+        }
+        return flat;
     }
 
     // Anthropic format: { name, description, input_schema }
     let name = tool.get("name").cloned().unwrap_or(json!(""));
     let description = tool.get("description").cloned().unwrap_or(json!(""));
-    let parameters = tool
+    let mut parameters = tool
         .get("input_schema")
         .cloned()
         .unwrap_or(json!({"type": "object", "properties": {}}));
+    sanitize_schema_for_responses(&mut parameters);
     json!({
         "type": "function",
         "name": name,
         "description": description,
         "parameters": parameters,
     })
+}
+
+/// Recursively adapt a JSON Schema so the OpenAI Responses API accepts it.
+///
+/// The Responses backend rejects an object-typed schema that declares neither
+/// `properties` nor `additionalProperties` — it does not 400, it accepts the
+/// request (HTTP 200) and then fails the stream with a `server_error` event,
+/// which surfaces as an empty, zero-token completion. Generic tool definitions
+/// shared with the Anthropic provider legitimately use a bare `{"type":
+/// "object"}` for a free-form map (e.g. `McpTool`'s `arguments`). For every
+/// such bare object we add `"additionalProperties": true`, which preserves the
+/// original free-form semantics. This adaptation belongs here, at the OpenAI
+/// boundary, rather than in the provider-agnostic tool definitions.
+fn sanitize_schema_for_responses(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                sanitize_schema_for_responses(child);
+            }
+            if map.get("type").and_then(|t| t.as_str()) == Some("object")
+                && !map.contains_key("properties")
+                && !map.contains_key("additionalProperties")
+            {
+                map.insert("additionalProperties".to_string(), Value::Bool(true));
+            }
+        }
+        Value::Array(items) => {
+            for child in items.iter_mut() {
+                sanitize_schema_for_responses(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn append_input_items(msg: &ConversationMessage, out: &mut Vec<Value>) {
@@ -829,6 +869,50 @@ mod tests {
         assert_eq!(converted["type"], "function");
         assert_eq!(converted["name"], "search");
         assert!(converted.get("function").is_none());
+    }
+
+    #[test]
+    fn test_convert_tool_sanitizes_bare_object_schemas() {
+        // McpTool-shaped tool: a free-form `arguments` object with no
+        // `properties`. The Responses backend rejects a bare object (it fails
+        // the stream with a server_error), so convert_tool must add
+        // `additionalProperties: true` — at the top level AND nested.
+        let tool = json!({
+            "name": "McpTool",
+            "description": "Call a tool on a connected MCP server",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "arguments": {"type": "object", "description": "free-form args"},
+                    "tool_name": {"type": "string"}
+                },
+                "required": ["tool_name"]
+            }
+        });
+        let converted = convert_tool(&tool);
+        let params = &converted["parameters"];
+        // Nested bare object got a permissive additionalProperties.
+        assert_eq!(params["properties"]["arguments"]["additionalProperties"], true);
+        // A well-formed object (declares `properties`) is left untouched.
+        assert!(params.get("additionalProperties").is_none());
+        // Scalar schemas are never altered.
+        assert_eq!(params["properties"]["tool_name"]["type"], "string");
+        assert!(params["properties"]["tool_name"]
+            .get("additionalProperties")
+            .is_none());
+    }
+
+    #[test]
+    fn test_convert_tool_flat_passthrough_sanitized() {
+        // Already-flat Responses tool with a bare top-level object schema.
+        let tool = json!({
+            "type": "function",
+            "name": "noargs",
+            "description": "takes anything",
+            "parameters": {"type": "object"}
+        });
+        let converted = convert_tool(&tool);
+        assert_eq!(converted["parameters"]["additionalProperties"], true);
     }
 
     /// Helper: extract MessageComplete from the last event in the vec.
