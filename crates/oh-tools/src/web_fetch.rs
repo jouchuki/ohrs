@@ -157,7 +157,11 @@ impl crate::traits::Tool for WebFetchTool {
         // can re-validate the host on EVERY hop (TOOL-8).
         let client = match Client::builder()
             .timeout(Duration::from_secs(20))
-            .user_agent("OpenHarness/0.1")
+            // Many sites block non-browser User-Agents; present a realistic one
+            // so WebFetch can read public pages (matches WebSearch).
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            )
             .redirect(reqwest::redirect::Policy::none())
             .build()
         {

@@ -61,7 +61,12 @@ impl crate::traits::Tool for WebSearchTool {
 
         let client = match Client::builder()
             .timeout(Duration::from_secs(20))
-            .user_agent("OpenHarness/0.1")
+            // DuckDuckGo serves an anti-bot "anomaly" challenge page (HTTP 202,
+            // zero results) to non-browser User-Agents like "OpenHarness/0.1".
+            // A realistic browser UA gets HTTP 200 with real results.
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            )
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
         {
