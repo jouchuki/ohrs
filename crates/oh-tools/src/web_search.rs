@@ -11,6 +11,12 @@ pub struct WebSearchTool;
 const DEFAULT_MAX_RESULTS: u64 = 5;
 const MAX_MAX_RESULTS: u64 = 10;
 
+/// A realistic browser UA. The DuckDuckGo HTML endpoint serves an anti-bot
+/// challenge page to non-browser UAs (and, increasingly, to datacenter IPs
+/// regardless of UA — which is why the Brave API is preferred when configured).
+const BROWSER_UA: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0";
+
 #[async_trait]
 impl crate::traits::Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -61,12 +67,7 @@ impl crate::traits::Tool for WebSearchTool {
 
         let client = match Client::builder()
             .timeout(Duration::from_secs(20))
-            // DuckDuckGo serves an anti-bot "anomaly" challenge page (HTTP 202,
-            // zero results) to non-browser User-Agents like "OpenHarness/0.1".
-            // A realistic browser UA gets HTTP 200 with real results.
-            .user_agent(
-                "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
-            )
+            .user_agent(BROWSER_UA)
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
         {
@@ -74,45 +75,116 @@ impl crate::traits::Tool for WebSearchTool {
             Err(e) => return ToolResult::error(format!("Failed to create HTTP client: {e}")),
         };
 
-        let response = match client
-            .post("https://html.duckduckgo.com/html/")
-            .form(&[("q", &query)])
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return ToolResult::error(format!("web_search failed: {e}")),
-        };
-
-        if !response.status().is_success() {
-            return ToolResult::error(format!(
-                "HTTP error: status {} for search query",
-                response.status().as_u16()
-            ));
+        // Prefer the Brave Search API when a key is configured. Datacenter IPs
+        // get anti-bot challenged by the DuckDuckGo HTML endpoint regardless of
+        // UA, so the DDG scrape is only a best-effort fallback (local/dev).
+        match std::env::var("BRAVE_API_KEY") {
+            Ok(key) if !key.trim().is_empty() => {
+                brave_search(&client, &query, max_results, key.trim()).await
+            }
+            _ => ddg_search(&client, &query, max_results).await,
         }
+    }
+}
 
-        let body = match response.text().await {
-            Ok(t) => t,
-            Err(e) => return ToolResult::error(format!("Failed to read response body: {e}")),
-        };
-
-        let results = parse_search_results(&body, max_results);
-
-        if results.is_empty() {
-            return ToolResult::error("No search results found.");
+/// Render results in the compact "Search results for:" text format.
+fn format_results(query: &str, results: &[SearchResult]) -> ToolResult {
+    if results.is_empty() {
+        return ToolResult::error("No search results found.");
+    }
+    let mut lines = vec![format!("Search results for: {query}")];
+    for (i, result) in results.iter().enumerate() {
+        lines.push(format!("{}. {}", i + 1, result.title));
+        lines.push(format!("   URL: {}", result.url));
+        if !result.snippet.is_empty() {
+            lines.push(format!("   {}", result.snippet));
         }
+    }
+    ToolResult::success(lines.join("\n"))
+}
 
-        let mut lines = vec![format!("Search results for: {query}")];
-        for (i, result) in results.iter().enumerate() {
-            lines.push(format!("{}. {}", i + 1, result.title));
-            lines.push(format!("   URL: {}", result.url));
-            if !result.snippet.is_empty() {
-                lines.push(format!("   {}", result.snippet));
+/// Query the Brave Search API (`X-Subscription-Token` auth). Reliable from
+/// datacenter IPs, unlike the DDG HTML scrape.
+async fn brave_search(
+    client: &Client,
+    query: &str,
+    max_results: usize,
+    key: &str,
+) -> ToolResult {
+    let response = match client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .query(&[("q", query), ("count", &max_results.to_string())])
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", key)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return ToolResult::error(format!("Brave search request failed: {e}")),
+    };
+    if !response.status().is_success() {
+        return ToolResult::error(format!(
+            "Brave search HTTP error: status {}",
+            response.status().as_u16()
+        ));
+    }
+    let json: serde_json::Value = match response.json().await {
+        Ok(j) => j,
+        Err(e) => return ToolResult::error(format!("Failed to parse Brave response: {e}")),
+    };
+    format_results(query, &parse_brave_results(&json, max_results))
+}
+
+/// Scrape the DuckDuckGo HTML endpoint. Best-effort fallback only.
+async fn ddg_search(client: &Client, query: &str, max_results: usize) -> ToolResult {
+    let response = match client
+        .post("https://html.duckduckgo.com/html/")
+        .form(&[("q", query)])
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return ToolResult::error(format!("web_search failed: {e}")),
+    };
+    if !response.status().is_success() {
+        return ToolResult::error(format!(
+            "HTTP error: status {} for search query",
+            response.status().as_u16()
+        ));
+    }
+    let body = match response.text().await {
+        Ok(t) => t,
+        Err(e) => return ToolResult::error(format!("Failed to read response body: {e}")),
+    };
+    format_results(query, &parse_search_results(&body, max_results))
+}
+
+/// Parse the Brave Search API JSON response (`web.results[]`).
+pub fn parse_brave_results(json: &serde_json::Value, limit: usize) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    let items = json
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|r| r.as_array());
+    if let Some(items) = items {
+        for item in items {
+            let title = clean_html(item.get("title").and_then(|v| v.as_str()).unwrap_or(""));
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet =
+                clean_html(item.get("description").and_then(|v| v.as_str()).unwrap_or(""));
+            if !title.is_empty() && !url.is_empty() {
+                results.push(SearchResult { title, url, snippet });
+            }
+            if results.len() >= limit {
+                break;
             }
         }
-
-        ToolResult::success(lines.join("\n"))
     }
+    results
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,6 +379,42 @@ mod tests {
         let html = "<html><body>No results</body></html>";
         let results = parse_search_results(html, 5);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_brave_results() {
+        let json = serde_json::json!({
+            "web": {"results": [
+                {"title": "Jeugdzorg <strong>tekort</strong>", "url": "https://vng.nl/a",
+                 "description": "De <strong>tekorten</strong> liepen op."},
+                {"title": "Tweede bron", "url": "https://example.nl/b", "description": ""}
+            ]}
+        });
+        let results = parse_brave_results(&json, 5);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Jeugdzorg tekort");   // HTML stripped
+        assert_eq!(results[0].url, "https://vng.nl/a");
+        assert_eq!(results[0].snippet, "De tekorten liepen op.");
+        assert_eq!(results[1].snippet, "");
+    }
+
+    #[test]
+    fn test_parse_brave_results_respects_limit_and_skips_incomplete() {
+        let json = serde_json::json!({
+            "web": {"results": [
+                {"title": "A", "url": "https://a"},
+                {"title": "", "url": "https://b"},      // no title -> skipped
+                {"title": "C", "url": "https://c"},
+            ]}
+        });
+        assert_eq!(parse_brave_results(&json, 1).len(), 1);
+        // empty-title row skipped, so within limit=5 we get A and C
+        assert_eq!(parse_brave_results(&json, 5).len(), 2);
+    }
+
+    #[test]
+    fn test_parse_brave_results_empty_on_missing_web() {
+        assert!(parse_brave_results(&serde_json::json!({}), 5).is_empty());
     }
 
     #[tokio::test]
