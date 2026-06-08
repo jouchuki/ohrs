@@ -102,11 +102,33 @@ fn build_command(command: &str, cwd: &PathBuf) -> tokio::process::Command {
     // Scrubbed, minimal environment (TOOL-2).
     cmd.env_clear();
     cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
-    cmd.env("HOME", cwd);
+    // HOME: forward the parent's HOME when set, else fall back to the per-job
+    // cwd. Production stages read-only reference data under the parent HOME
+    // (e.g. the cbs-tool catalog at ~/.local/share/cbs-tool/); resetting HOME
+    // to cwd silently breaks every tool that resolves config via Path.home().
+    // Writes to HOME remain blocked by Landlock + ProtectSystem — tools only
+    // READ from it.
+    match std::env::var_os("HOME") {
+        Some(home) => cmd.env("HOME", home),
+        None => cmd.env("HOME", cwd),
+    };
     cmd.env("PWD", cwd);
     cmd.env("LANG", "C.UTF-8");
     if let Some(term) = std::env::var_os("TERM") {
         cmd.env("TERM", term);
+    }
+    // TOOL-2 carve-out: forward a prefix allowlist of NON-SECRET tool-config
+    // vars the Capelle CLIs need (e.g. CAPELLE_CHROMA_HTTP routes
+    // capelle-beleid to the Chroma server). The host scopes ohrs's own env to
+    // a curated allowlist, where the only secrets (CODEX_*, OPENAI_API_KEY) do
+    // NOT match these prefixes — so they stay scrubbed from agent-controlled
+    // bash. Never widen this to a broad passthrough.
+    for (key, val) in std::env::vars_os() {
+        if let Some(k) = key.to_str() {
+            if k.starts_with("CAPELLE_") || k.starts_with("CBS_") {
+                cmd.env(&key, &val);
+            }
+        }
     }
 
     cmd.stdin(Stdio::null());
@@ -384,6 +406,51 @@ mod tests {
         let actual =
             std::fs::canonicalize(actual_trimmed).unwrap_or_else(|_| actual_trimmed.into());
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_env_allowlist_forwards_home_and_capelle_but_scrubs_rest() {
+        // Regression (capelle): env_clear() (TOOL-2) wiped HOME and
+        // CAPELLE_CHROMA_HTTP, silently breaking the cbs (catalog under
+        // ~/.local/share) and capelle-beleid (CAPELLE_CHROMA_HTTP routing)
+        // CLIs. HOME + CAPELLE_*/CBS_* must reach the command; everything else
+        // (notably CODEX_*/OPENAI_API_KEY secrets) must stay scrubbed.
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().to_string_lossy().to_string();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home_path);
+        std::env::set_var("CAPELLE_OHRS_ENVTEST", "chroma-host-42");
+        std::env::set_var("OHRS_ENVTEST_NOTALLOWED", "leaky-secret");
+        let tool = BashTool;
+        let result = tool
+            .execute(
+                serde_json::json!({"command":
+                    "printf 'HOME=%s CAP=%s OTHER=%s' \"$HOME\" \"$CAPELLE_OHRS_ENVTEST\" \"$OHRS_ENVTEST_NOTALLOWED\""}),
+                &ctx(),
+            )
+            .await;
+        std::env::remove_var("CAPELLE_OHRS_ENVTEST");
+        std::env::remove_var("OHRS_ENVTEST_NOTALLOWED");
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(!result.is_error, "{}", result.output);
+        assert!(
+            result.output.contains(&format!("HOME={home_path}")),
+            "parent HOME should be forwarded, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("CAP=chroma-host-42"),
+            "CAPELLE_* tool-config var should be forwarded, got: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("leaky-secret"),
+            "non-allowlisted var must stay scrubbed, got: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
