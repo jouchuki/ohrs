@@ -14,7 +14,16 @@ impl crate::traits::Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a local background agent task for complex delegated work."
+        "Delegate an independent sub-question or concept to a dedicated sub-agent \
+         that investigates it in parallel, in its OWN fresh context window, and \
+         returns its findings. PREFER this whenever the work splits into parts \
+         that each deserve sole focus: spawn one agent per branch — a distinct \
+         entity, a hypothesis to test, a source to verify, a sub-analysis — \
+         instead of carrying every thread yourself. Each agent has its own \
+         context budget, so fanning out yields a deeper, more complete result \
+         than doing it all in one thread. The sub-agent shares your working \
+         directory and tools; collect results with TaskGet/TaskOutput and \
+         synthesize them. Use it liberally to decompose multi-part work."
     }
 
     fn input_schema(&self) -> serde_json::Value {
